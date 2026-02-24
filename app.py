@@ -5,13 +5,13 @@ import json
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-# --- 1. НАСТРОЙКА И БЕЗОПАСНОСТЬ ---
-st.set_page_config(page_title="Engineer Verified Assistant", layout="wide")
+# --- 1. НАСТРОЙКА ---
+st.set_page_config(page_title="Engineer Verified Pro", layout="wide")
 
 # Проверка пароля
 target_password = st.secrets.get("COMPANY_PASSWORD", "123")
 if "auth" not in st.session_state:
-    st.title("🔐 Авторизация системы")
+    st.title("🔐 Авторизация")
     pwd = st.text_input("Введите инженерный пароль", type="password")
     if st.button("Войти"):
         if pwd == target_password:
@@ -26,32 +26,30 @@ api_key = st.secrets.get("GOOGLE_API_KEY")
 MODEL_ID = "gemini-2.5-flash" 
 API_URL = f"https://generativelanguage.googleapis.com/v1/models/{MODEL_ID}:generateContent?key={api_key}"
 
-# --- 3. ПОДГОТОВКА БАЗЫ ЗНАНИЙ ---
+# --- 3. ОБРАБОТКА PDF ---
 @st.cache_resource
-def load_docs_with_metadata():
+def load_docs_engine():
     docs_path = "./docs"
     if not os.path.exists(docs_path) or not os.listdir(docs_path):
         return None
     
     all_chunks = []
-    pdf_files = [f for f in os.listdir(docs_path) if f.endswith(".pdf")]
+    files = [f for f in os.listdir(docs_path) if f.endswith(".pdf")]
     
-    for f in pdf_files:
+    for f in files:
         try:
             loader = PyPDFLoader(os.path.join(docs_path, f))
             pages = loader.load()
-            # Инженерный сплиттер: куски по 1200 знаков для точности
-            splitter = RecursiveCharacterTextSplitter(chunk_size=1200, chunk_overlap=150)
+            splitter = RecursiveCharacterTextSplitter(chunk_size=1500, chunk_overlap=200)
             all_chunks.extend(splitter.split_documents(pages))
         except Exception as e:
-            st.error(f"Ошибка в файле {f}: {e}")
+            st.error(f"Ошибка в {f}: {e}")
             
     return all_chunks
 
-chunks = load_docs_with_metadata()
+chunks = load_docs_engine()
 
-def get_context_for_query(query, chunks):
-    """Находит наиболее релевантные куски текста для конкретного вопроса"""
+def get_context(query, chunks):
     if not chunks: return [], ""
     query_words = query.lower().split()
     scored = []
@@ -61,90 +59,92 @@ def get_context_for_query(query, chunks):
             scored.append((score, c))
     
     scored.sort(key=lambda x: x[0], reverse=True)
-    top_chunks = scored[:6] # Берем топ-6 самых точных совпадений
+    top_chunks = scored[:8] # Берем до 8 кандидатов
     
+    raw_data = []
     context_text = ""
-    raw_sources_data = []
-    
     for _, c in top_chunks:
-        source_name = os.path.basename(c.metadata.get('source', 'unknown'))
-        page_num = c.metadata.get('page', 0) + 1
-        header = f"Файл: {source_name}, Стр: {page_num}"
+        header = f"Файл: {os.path.basename(c.metadata['source'])}, Стр: {c.metadata['page'] + 1}"
+        raw_data.append({"header": header, "content": c.page_content})
+        context_text += f"\n--- {header} ---\n{c.page_content}\n"
         
-        context_text += f"\n--- ИСТОЧНИК: {header} ---\n{c.page_content}\n"
-        raw_sources_data.append({"header": header, "content": c.page_content})
-        
-    return raw_sources_data, context_text
+    return raw_data, context_text
 
-# --- 4. ИНТЕРФЕЙС ЧАТА ---
-st.title("🏗️ Технический контроль документации")
-st.caption(f"Активная модель: {MODEL_ID} | Режим верификации: Включен")
+# --- 4. ИНТЕРФЕЙС ---
+st.title("🏗️ Технический контроль (Strict & Full View)")
+st.info("Бот фильтрует исходники согласно финальным ссылкам. Полный лог доступен по запросу.")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Отображение истории сообщений
+# Отрисовка истории
 for i, m in enumerate(st.session_state.messages):
     with st.chat_message(m["role"]):
         st.markdown(m["content"])
         
-        # Показываем блок верификации ТОЛЬКО если он привязан к этому конкретному сообщению
-        if "raw_sources" in m and m["raw_sources"]:
-            with st.expander(f"🔍 Исходные данные из PDF для ответа №{i//2 + 1}"):
-                for idx, src in enumerate(m["raw_sources"]):
-                    st.info(f"**{src['header']}**")
-                    st.text(src['content']) # Используем text для сохранения форматирования PDF
+        if "verified_sources" in m and m["verified_sources"]:
+            with st.expander(f"✅ Подтверждающие выдержки (к ответу №{i//2 + 1})"):
+                for src in m["verified_sources"]:
+                    st.success(f"**{src['header']}**")
+                    st.text(src['content'])
+            
+            with st.expander(f"⚙️ Показать всё найденное (RAW Context)"):
+                for src in m["all_found"]:
+                    st.caption(f"**{src['header']}**")
+                    st.text(src['content'])
 
-# Ввод нового вопроса
-if prompt := st.chat_input("Запросить технические данные..."):
-    # Сохраняем и отображаем вопрос пользователя
+# Ввод
+if prompt := st.chat_input("Запросить данные..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        # Поиск контекста именно для ТЕКУЩЕГО вопроса
-        current_raw_sources, context_for_ai = get_context_for_query(prompt, chunks)
+        # 1. Поиск всех кандидатов
+        all_found, context_for_ai = get_context(prompt, chunks)
         
-        with st.spinner("Сверка с базой регламентов..."):
+        with st.spinner("Анализ и фильтрация источников..."):
             system_instruction = """
-            ТЫ: Промышленный ИИ-эксперт.
-            ЗАДАЧА: Дать ответ ТОЛЬКО на основе предоставленного КОНТЕКСТА.
-            
-            ТРЕБОВАНИЯ К ОФОРМЛЕНИЮ:
-            1. Пиши только техническую суть. БЕЗ ссылок внутри предложений.
-            2. Если информации нет в контексте, ответь: "В загруженных спецификациях данные отсутствуют".
-            3. В КОНЦЕ ответа создай раздел "### Ссылки на документацию" и перечисли там все файлы и страницы.
-            4. Температура ответа: 0.0 (строгая точность).
+            Ты — промышленный ИИ-эксперт. 
+            Отвечай ТОЛЬКО по контексту. 
+            В конце ВСЕГДА пиши раздел '### Ссылки на документацию'.
+            Каждая ссылка должна быть строго в формате: 'Файл: [имя], Стр: [номер]'.
+            Не используй ссылки в тексте, только в финальном списке.
             """
             
             payload = {
                 "contents": [{"parts": [{"text": f"{system_instruction}\n\nКОНТЕКСТ:\n{context_for_ai}\n\nВОПРОС:\n{prompt}"}]}],
-                "generationConfig": {"temperature": 0.0, "maxOutputTokens": 3000}
+                "generationConfig": {"temperature": 0.0}
             }
             
             try:
                 response = requests.post(API_URL, json=payload, timeout=40)
-                if response.status_code == 200:
-                    answer = response.json()['candidates'][0]['content']['parts'][0]['text']
-                else:
-                    answer = f"❌ Ошибка API ({response.status_code}). Проверьте ключ или модель."
-            except Exception as e:
-                answer = f"❌ Ошибка связи с сервером: {str(e)}"
+                answer = response.json()['candidates'][0]['content']['parts'][0]['text']
+                
+                # 2. ФИЛЬТРАЦИЯ: оставляем только те чанки, которые ИИ упомянул в тексте
+                verified_sources = [s for s in all_found if s['header'] in answer]
+            except:
+                answer = "❌ Ошибка связи с API."
+                verified_sources = []
 
-        # Вывод ответа
         st.markdown(answer)
         
-        # Вывод блока верификации (Expander) сразу под ответом
-        if current_raw_sources:
-            with st.expander("🔍 Исходные данные из PDF для этого ответа"):
-                for idx, src in enumerate(current_raw_sources):
-                    st.info(f"**{src['header']}**")
+        # 3. Вывод блоков сразу
+        if verified_sources:
+            with st.expander("✅ Подтверждающие выдержки"):
+                for src in verified_sources:
+                    st.success(f"**{src['header']}**")
                     st.text(src['content'])
         
-        # Сохранение в историю с жесткой привязкой источников
+        with st.expander("⚙️ Показать всё найденное"):
+            for src in all_found:
+                st.caption(f"**{src['header']}**")
+                st.text(src['content'])
+        
+        # Сохранение
         st.session_state.messages.append({
             "role": "assistant", 
             "content": answer, 
-            "raw_sources": current_raw_sources # Важно: сохраняем список источников внутри объекта сообщения
+            "verified_sources": verified_sources,
+            "all_found": all_found
         })
