@@ -75,7 +75,7 @@ def load_all_text():
 knowledge_base = load_all_text()
 
 # --- 4. ИНТЕРФЕЙС ---
-st.title("🤖 Помощник по SIEM")
+st.title("🤖 Помощник по MaxPatrol SIEM")
 st.caption(f"Активная модель: {WORKING_MODEL}")
 
 if not knowledge_base:
