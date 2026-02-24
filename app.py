@@ -67,4 +67,82 @@ def get_context(query, chunks):
     scored = []
     for c in chunks:
         # Считаем совпадения слов для релевантности
-        score = sum(1 for w in words if w in c
+        score = sum(1 for w in words if w in c.page_content.lower())
+        if score > 0:
+            scored.append((score, c.page_content))
+    
+    # Сортируем и берем 5 самых подходящих кусков
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return "\n\n".join([c[1] for c in scored[:5]])
+
+# --- 4. ИНТЕРФЕЙС ЧАТА ---
+st.title("🤖 Технический ассистент (Diagnostic Mode)")
+st.info(status_msg)
+
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+# Отображение истории чата
+for m in st.session_state.messages:
+    with st.chat_message(m["role"]):
+        st.markdown(m["content"])
+
+if prompt := st.chat_input("Спросите что-нибудь из документации..."):
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    with st.chat_message("assistant"):
+        with st.spinner("Диагностика каналов связи с Google..."):
+            context = get_context(prompt, chunks)
+            error_log = []
+            res_text = ""
+            
+            # ЦИКЛ ПЕРЕБОРА МОДЕЛЕЙ
+            for model_name in MODELS_TO_TRY:
+                # Явно стучимся в версию v1 (стабильную)
+                url = f"https://generativelanguage.googleapis.com/v1/models/{model_name}:generateContent?key={api_key}"
+                
+                payload = {
+                    "contents": [{
+                        "parts": [{
+                            "text": f"Ты тех-эксперт. Используй только этот контекст для ответа:\n{context}\n\nВопрос: {prompt}"
+                        }]
+                    }],
+                    "generationConfig": {
+                        "temperature": 0.2,
+                        "maxOutputTokens": 2048
+                    }
+                }
+                
+                headers = {'Content-Type': 'application/json'}
+                
+                try:
+                    response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=15)
+                    
+                    if response.status_code == 200:
+                        res_json = response.json()
+                        res_text = res_json['candidates'][0]['content']['parts'][0]['text']
+                        break # Нашли рабочую модель — выходим из цикла
+                    else:
+                        # Фиксируем причину отказа для каждой модели
+                        try:
+                            err_data = response.json()
+                            msg = err_data.get('error', {}).get('message', 'Нет описания ошибки')
+                        except:
+                            msg = response.text[:100]
+                        error_log.append(f"❌ {model_name}: Ошибка {response.status_code} ({msg})")
+                
+                except Exception as e:
+                    error_log.append(f"⚠️ {model_name}: Ошибка запроса ({str(e)})")
+
+            # Если ни одна модель не ответила
+            if not res_text:
+                res_text = "### 🛑 Не удалось получить ответ от Google API\n\n"
+                res_text += "Я перебрал доступные модели, и вот результаты:\n"
+                for log in error_log:
+                    res_text += f"{log}\n"
+                res_text += "\n---\n**Рекомендации:**\n1. Проверьте API-ключ в Settings -> Secrets.\n2. Убедитесь, что для вашего региона (IP сервера) разрешен Gemini.\n3. Попробуйте создать новый API-ключ в Google AI Studio."
+
+        st.markdown(res_text)
+        st.session_state.messages.append({"role": "assistant", "content": res_text})
