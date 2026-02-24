@@ -6,7 +6,7 @@ from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # --- 1. НАСТРОЙКА И ПАРОЛЬ ---
-st.set_page_config(page_title="Technical Assistant Fixed", layout="wide")
+st.set_page_config(page_title="Technical Assistant Ultimate", layout="wide")
 target_password = st.secrets.get("COMPANY_PASSWORD", "SuperSecret123")
 
 if "auth" not in st.session_state:
@@ -22,8 +22,13 @@ if "auth" not in st.session_state:
 
 # --- 2. API КОНФИГУРАЦИЯ ---
 api_key = st.secrets.get("GOOGLE_API_KEY")
-# Принудительно используем стабильный эндпоинт v1
-API_URL = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={api_key}"
+
+# Список возможных имен моделей для перебора
+MODELS_TO_TRY = [
+    "gemini-1.5-flash",
+    "gemini-1.5-flash-latest",
+    "gemini-pro"
+]
 
 # --- 3. ОБРАБОТКА PDF ---
 @st.cache_resource
@@ -31,7 +36,7 @@ def process_docs():
     docs_path = "./docs"
     if not os.path.exists(docs_path): os.makedirs(docs_path)
     files = [f for f in os.listdir(docs_path) if f.endswith(".pdf")]
-    if not files: return None, "Файлы не найдены."
+    if not files: return None, "Файлы PDF не найдены в папке /docs."
     
     try:
         all_docs = []
@@ -41,7 +46,7 @@ def process_docs():
         
         splitter = RecursiveCharacterTextSplitter(chunk_size=1500, chunk_overlap=200)
         chunks = splitter.split_documents(all_docs)
-        return chunks, f"Загружено чанков: {len(chunks)}"
+        return chunks, f"Документы загружены. Чанков: {len(chunks)}"
     except Exception as e:
         return None, f"Ошибка PDF: {str(e)}"
 
@@ -67,40 +72,34 @@ if "messages" not in st.session_state:
 for m in st.session_state.messages:
     with st.chat_message(m["role"]): st.markdown(m["content"])
 
-if prompt := st.chat_input("Ваш вопрос..."):
+if prompt := st.chat_input("Задайте вопрос..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"): st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        with st.spinner("Связь с сервером Google..."):
+        with st.spinner("Поиск рабочей модели..."):
             context = get_context(prompt, chunks)
+            res_text = "Не удалось связаться ни с одной моделью Google."
             
-            # Формируем JSON для прямого POST-запроса
-            payload = {
-                "contents": [{
-                    "parts": [{
-                        "text": f"Ты тех-эксперт. Отвечай подробно по контексту.\n\nКОНТЕКСТ:\n{context}\n\nВОПРОС:\n{prompt}"
-                    }]
-                }],
-                "generationConfig": {
-                    "temperature": 0.1,
-                    "maxOutputTokens": 2048
+            # ПЕРЕБОР МОДЕЛЕЙ
+            for model_name in MODELS_TO_TRY:
+                url = f"https://generativelanguage.googleapis.com/v1/models/{model_name}:generateContent?key={api_key}"
+                payload = {
+                    "contents": [{"parts": [{"text": f"Ты тех-эксперт. Используй контекст для подробного ответа.\n\nКОНТЕКСТ:\n{context}\n\nВОПРОС:\n{prompt}"}]}],
+                    "generationConfig": {"temperature": 0.2}
                 }
-            }
-            
-            headers = {'Content-Type': 'application/json'}
-            
-            try:
-                # Прямой HTTP запрос к стабильной версии API
-                response = requests.post(API_URL, headers=headers, data=json.dumps(payload))
-                res_json = response.json()
                 
-                if response.status_code == 200:
-                    res_text = res_json['candidates'][0]['content']['parts'][0]['text']
-                else:
-                    res_text = f"Ошибка API {response.status_code}: {res_json.get('error', {}).get('message', 'Unknown error')}"
-            except Exception as e:
-                res_text = f"Ошибка запроса: {str(e)}"
+                try:
+                    response = requests.post(url, headers={'Content-Type': 'application/json'}, data=json.dumps(payload))
+                    if response.status_code == 200:
+                        res_json = response.json()
+                        res_text = res_json['candidates'][0]['content']['parts'][0]['text']
+                        break # Если получили ответ, выходим из цикла
+                    else:
+                        error_msg = response.json().get('error', {}).get('message', '')
+                        continue # Если 404, пробуем следующую модель
+                except:
+                    continue
         
         st.markdown(res_text)
         st.session_state.messages.append({"role": "assistant", "content": res_text})
