@@ -33,25 +33,35 @@ if "auth" not in st.session_state:
 # --- 3. ИНИЦИАЛИЗАЦИЯ API ---
 api_key = st.secrets.get("GOOGLE_API_KEY")
 if not api_key:
-    st.error("GOOGLE_API_KEY не найден в Secrets!")
+    st.error("GOOGLE_API_KEY не найден!")
     st.stop()
 
-os.environ["GOOGLE_API_KEY"] = api_key
 genai.configure(api_key=api_key)
 
-# Класс-адаптер для эмбеддингов (чтобы Chroma не ругалась на 404)
+# УЛЬТРА-СТАБИЛЬНЫЙ КЛАСС ЭМБЕДДИНГОВ
 class GoogleNativeEmbeddings:
     def embed_documents(self, texts):
+        # Используем embedding-001 - она самая стабильная и есть везде
         return [self.embed_query(text) for text in texts]
+    
     def embed_query(self, text):
-        result = genai.embed_content(model="models/text-embedding-004", content=text, task_type="retrieval_document")
-        return result['embedding']
+        try:
+            # Прямой вызов без указания v1beta
+            result = genai.embed_content(
+                model="models/embedding-001", 
+                content=text, 
+                task_type="retrieval_document"
+            )
+            return result['embedding']
+        except Exception as e:
+            # Если даже это упадет, мы увидим настоящую причину
+            raise Exception(f"Google API Error: {str(e)}")
 
 @st.cache_resource
 def load_rag():
     docs_path = "./docs"
     if not os.path.exists(docs_path) or not os.listdir(docs_path):
-        return None, "Папка /docs пуста."
+        return None, "Папка /docs пуста. Загрузите PDF в GitHub."
 
     try:
         pages = []
@@ -60,16 +70,20 @@ def load_rag():
                 loader = PyPDFLoader(os.path.join(docs_path, f))
                 pages.extend(loader.load())
         
+        if not pages:
+            return None, "PDF файлы найдены, но они пустые или не читаются."
+
         splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
         chunks = splitter.split_documents(pages)
         
-        # Используем наш кастомный адаптер вместо стандартного LangChain класса
+        # Нативный адаптер
         embeddings = GoogleNativeEmbeddings()
         
+        # Создаем базу
         vector_db = Chroma.from_documents(chunks, embeddings)
-        return vector_db.as_retriever(search_kwargs={"k": 3}), "База готова!"
+        return vector_db.as_retriever(search_kwargs={"k": 3}), "✅ База знаний успешно загружена!"
     except Exception as e:
-        return None, f"Ошибка RAG: {str(e)}"
+        return None, f"ошибка на этапе RAG: {str(e)}"
 
 retriever, status = load_rag()
 
@@ -90,7 +104,7 @@ if prompt := st.chat_input("Ваш вопрос"):
     with st.chat_message("assistant"):
         if retriever:
             llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash")
-            tpl = ChatPromptTemplate.from_template("Используй текст для ответа: {context}\nВопрос: {question}")
+            tpl = ChatPromptTemplate.from_template("Контекст: {context}\n\nВопрос: {question}")
             chain = (
                 {"context": retriever | (lambda ds: "\n\n".join(d.page_content for d in ds)), 
                  "question": RunnablePassthrough()}
@@ -98,7 +112,7 @@ if prompt := st.chat_input("Ваш вопрос"):
             )
             res = chain.invoke(prompt)
         else:
-            res = "Документы не найдены. Проверьте папку /docs в GitHub."
+            res = f"Ошибка: {status}"
         
         st.markdown(res)
         st.session_state.messages.append({"role": "assistant", "content": res})
