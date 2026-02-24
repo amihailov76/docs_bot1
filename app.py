@@ -33,10 +33,13 @@ def load_docs_with_metadata():
     all_chunks = []
     for f in os.listdir(docs_path):
         if f.endswith(".pdf"):
-            loader = PyPDFLoader(os.path.join(docs_path, f))
-            pages = loader.load()
-            splitter = RecursiveCharacterTextSplitter(chunk_size=1200, chunk_overlap=150)
-            all_chunks.extend(splitter.split_documents(pages))
+            try:
+                loader = PyPDFLoader(os.path.join(docs_path, f))
+                pages = loader.load()
+                splitter = RecursiveCharacterTextSplitter(chunk_size=1500, chunk_overlap=200)
+                all_chunks.extend(splitter.split_documents(pages))
+            except Exception as e:
+                st.error(f"Ошибка в файле {f}: {e}")
     return all_chunks
 
 chunks = load_docs_with_metadata()
@@ -51,7 +54,7 @@ def get_engineered_context(query, chunks):
             scored.append((score, c))
     
     scored.sort(key=lambda x: x[0], reverse=True)
-    top_chunks = scored[:6]
+    top_chunks = scored[:7]
     
     context_text = ""
     raw_data_for_ui = []
@@ -59,16 +62,16 @@ def get_engineered_context(query, chunks):
     for score, c in top_chunks:
         source_name = os.path.basename(c.metadata.get('source', 'unknown'))
         page_num = c.metadata.get('page', 0) + 1
-        header = f"ДОКУМЕНТ: {source_name} | СТРАНИЦА: {page_num}"
+        header = f"Файл: {source_name}, Стр: {page_num}"
         
-        context_text += f"\n--- {header} ---\n{c.page_content}\n"
+        context_text += f"\n--- ИСТОЧНИК: {header} ---\n{c.page_content}\n"
         raw_data_for_ui.append({"header": header, "content": c.page_content})
         
     return raw_data_for_ui, context_text
 
 # --- 4. ИНТЕРФЕЙС ---
 st.title("🏗️ Технический контроль документации")
-st.info("Режим: Верификация источников включена. Температура: 0.0 (Strict)")
+st.info("Режим: Чистый текст + Ссылки в конце. Модель: Gemini 2.5 Flash")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -89,14 +92,16 @@ if prompt := st.chat_input("Введите технический запрос..
     with st.chat_message("assistant"):
         raw_sources, context_for_ai = get_engineered_context(prompt, chunks)
         
-        with st.spinner("Проверка регламентов..."):
+        with st.spinner("Поиск в регламентах..."):
             system_instruction = """
             Ты — промышленный ИИ-ассистент. Твоя задача — извлекать точные данные из тех-документации.
+            
             ПРАВИЛА ОТВЕТА:
-            1. Используй ТОЛЬКО предоставленный текст.
-            2. После КАЖДОГО утверждения или цифры ставь ссылку: **[Файл, Стр]**.
-            3. Если информации нет, прямо ответь: "Данные не обнаружены в базе".
-            4. Оформляй списки через дефис, важные параметры выделяй жирным.
+            1. ПИШИ ЧИСТЫЙ ТЕКСТ. Не вставляй ссылки на файлы или страницы в середину предложений или в конец абзацев.
+            2. Используй ТОЛЬКО предоставленный контекст. Если данных нет, напиши: "Данные не обнаружены в базе".
+            3. В САМОМ КОНЦЕ ответа добавь подзаголовок "### Ссылки на документацию".
+            4. Под этим заголовком перечисли списком все файлы и номера страниц, которые были использованы для ответа.
+            5. Оформляй технические параметры жирным шрифтом, используй таблицы для списков характеристик.
             """
             
             payload = {
@@ -105,20 +110,18 @@ if prompt := st.chat_input("Введите технический запрос..
             }
             
             try:
-                response = requests.post(API_URL, json=payload, timeout=30)
+                response = requests.post(API_URL, json=payload, timeout=40)
                 answer = response.json()['candidates'][0]['content']['parts'][0]['text']
             except:
-                answer = "❌ Ошибка обработки запроса."
+                answer = "❌ Ошибка обработки запроса. Проверьте соединение с API."
 
         st.markdown(answer)
         
-        # Добавляем блок верификации
         with st.expander("🔍 Показать исходные выдержки из PDF"):
             for src in raw_sources:
                 st.caption(f"**{src['header']}**")
                 st.code(src['content'], language=None)
         
-        # Сохраняем в историю вместе с источниками
         st.session_state.messages.append({
             "role": "assistant", 
             "content": answer, 
