@@ -4,4 +4,4 @@ langchain-community
 langchain-google-genai
 pypdf
 chromadb
-google-generativeai
+google-generativeai>=0.7.0
