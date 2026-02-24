@@ -24,23 +24,29 @@ if not api_key:
     st.error("GOOGLE_API_KEY не найден!")
     st.stop()
 
+# Конфигурация с явным указанием транспорта и API
 genai.configure(api_key=api_key)
 
-# ФУНКЦИЯ АВТОПОДБОРА МОДЕЛИ
 @st.cache_resource
 def get_available_model():
     try:
-        # Просим список всех моделей, доступных вашему ключу
-        for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
-                # Отдаем приоритет 1.5 flash, если она есть
-                if 'gemini-1.5-flash' in m.name:
-                    return m.name
-        # Если flash не нашли, берем любую первую доступную
-        return genai.list_models()[0].name
+        # Корректно перебираем генератор
+        models = list(genai.list_models())
+        
+        # Сначала ищем Gemini 1.5 Flash
+        for m in models:
+            if 'gemini-1.5-flash' in m.name and 'generateContent' in m.supported_generation_methods:
+                return m.name
+        
+        # Если нет, ищем любую подходящую модель Gemini
+        for m in models:
+            if 'gemini' in m.name and 'generateContent' in m.supported_generation_methods:
+                return m.name
+        
+        return "models/gemini-1.5-flash" # Фолбэк
     except Exception as e:
-        st.error(f"Не удалось получить список моделей: {e}")
-        return "models/gemini-pro" # Попытка наугад
+        st.error(f"Ошибка при поиске моделей: {e}")
+        return "models/gemini-1.5-flash"
 
 WORKING_MODEL = get_available_model()
 
@@ -48,16 +54,20 @@ WORKING_MODEL = get_available_model()
 @st.cache_resource
 def load_all_text():
     docs_path = "./docs"
-    if not os.path.exists(docs_path) or not os.listdir(docs_path):
+    if not os.path.exists(docs_path):
+        os.makedirs(docs_path)
+    
+    files = [f for f in os.listdir(docs_path) if f.endswith(".pdf")]
+    if not files:
         return ""
+    
     full_text = ""
     try:
-        for f in os.listdir(docs_path):
-            if f.endswith(".pdf"):
-                loader = PyPDFLoader(os.path.join(docs_path, f))
-                pages = loader.load()
-                for page in pages:
-                    full_text += page.page_content + "\n\n"
+        for f in files:
+            loader = PyPDFLoader(os.path.join(docs_path, f))
+            pages = loader.load()
+            for page in pages:
+                full_text += page.page_content + "\n\n"
         return full_text
     except Exception as e:
         return ""
@@ -66,7 +76,7 @@ knowledge_base = load_all_text()
 
 # --- 4. ИНТЕРФЕЙС ---
 st.title("🤖 Корпоративный ассистент")
-st.caption(f"Используемая модель: {WORKING_MODEL}")
+st.caption(f"Активная модель: {WORKING_MODEL}")
 
 if not knowledge_base:
     st.warning("⚠️ Загрузите PDF в папку docs на GitHub.")
@@ -83,16 +93,18 @@ if prompt := st.chat_input("Ваш вопрос..."):
 
     with st.chat_message("assistant"):
         try:
-            # Используем найденную модель
+            # Создаем модель
             model = genai.GenerativeModel(WORKING_MODEL)
             
-            full_prompt = f"Контекст: {knowledge_base[:300000]}\n\nВопрос: {prompt}"
+            # Ограничиваем контекст (Gemini 1.5 Flash держит много, но для стабильности возьмем 100к символов)
+            context = knowledge_base[:100000] if knowledge_base else "Документация не загружена."
             
-            # Принудительная генерация
+            full_prompt = f"Контекст из документов:\n{context}\n\nВопрос пользователя: {prompt}\n\nОтвечай строго по контексту."
+            
             response = model.generate_content(full_prompt)
             res_text = response.text
         except Exception as e:
-            res_text = f"Ошибка генерации ({WORKING_MODEL}): {str(e)}"
+            res_text = f"Ошибка генерации: {str(e)}"
         
         st.markdown(res_text)
         st.session_state.messages.append({"role": "assistant", "content": res_text})
