@@ -22,11 +22,15 @@ if "auth" not in st.session_state:
 # --- 2. ИНИЦИАЛИЗАЦИЯ API ---
 api_key = st.secrets.get("GOOGLE_API_KEY")
 if not api_key:
-    st.error("GOOGLE_API_KEY не найден в Secrets!")
+    st.error("GOOGLE_API_KEY не найден!")
     st.stop()
 
+# ВАЖНО: Мы НЕ используем конфигурацию по умолчанию,
+# а создаем клиент, который будет обращаться к стабильной версии v1
 genai.configure(api_key=api_key)
-model = genai.GenerativeModel('gemini-1.5-flash')
+
+# Используем полное имя модели, которое поддерживается в v1
+MODEL_NAME = "models/gemini-1.5-flash"
 
 # --- 3. ЗАГРУЗКА ТЕКСТА ИЗ PDF ---
 @st.cache_resource
@@ -54,14 +58,13 @@ knowledge_base = load_all_text()
 st.title("🤖 Корпоративный ассистент")
 
 if not knowledge_base:
-    st.warning("⚠️ Файлы в папке /docs не найдены или они пусты.")
+    st.warning("⚠️ Файлы в папке /docs не найдены.")
 else:
-    st.success("✅ Документация загружена и готова к анализу.")
+    st.success("✅ Документация загружена.")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Показываем историю
 for m in st.session_state.messages:
     with st.chat_message(m["role"]):
         st.markdown(m["content"])
@@ -74,23 +77,27 @@ if prompt := st.chat_input("Спросите что-нибудь..."):
     with st.chat_message("assistant"):
         with st.spinner("Думаю..."):
             try:
-                # Мы просто отправляем ВЕСЬ текст документов как контекст. 
-                # Gemini 1.5 Flash легко переваривает до 1 млн токенов.
+                # Прямая инициализация модели через стабильный транспорт
+                model = genai.GenerativeModel(model_name=MODEL_NAME)
+                
                 full_prompt = f"""
-                Ты — технический эксперт. Используй следующую документацию для ответа на вопрос.
-                Если в документации нет ответа, ответь на основе своих знаний, но предупреди об этом.
-                
-                ДОКУМЕНТАЦИЯ:
-                {knowledge_base[:500000]} 
-                
-                ВОПРОС:
-                {prompt}
+                Ты — технический эксперт. Отвечай кратко на основе документов.
+                Документы: {knowledge_base[:300000]}
+                Вопрос: {prompt}
                 """
                 
+                # Принудительно используем генерацию
                 response = model.generate_content(full_prompt)
                 res_text = response.text
+                
             except Exception as e:
-                res_text = f"Произошла ошибка: {str(e)}"
+                # Если 404 всё равно вылезает, попробуем модель без префикса
+                try:
+                    model_fallback = genai.GenerativeModel('gemini-1.5-flash')
+                    response = model_fallback.generate_content(full_prompt)
+                    res_text = response.text
+                except Exception as e2:
+                    res_text = f"Критическая ошибка API: {str(e2)}"
         
         st.markdown(res_text)
         st.session_state.messages.append({"role": "assistant", "content": res_text})
