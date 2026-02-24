@@ -6,12 +6,12 @@ from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # --- 1. НАСТРОЙКА ---
-st.set_page_config(page_title="Engineer Documentation Assistant", layout="wide")
+st.set_page_config(page_title="Engineer Source Verified", layout="wide")
 target_password = st.secrets.get("COMPANY_PASSWORD", "123")
 
 if "auth" not in st.session_state:
-    st.title("🔐 Вход для инженеров")
-    pwd = st.text_input("Введите пароль доступа", type="password")
+    st.title("🔐 Авторизация системы")
+    pwd = st.text_input("Пароль инженера", type="password")
     if st.button("Войти"):
         if pwd == target_password:
             st.session_state.auth = True
@@ -23,92 +23,104 @@ api_key = st.secrets.get("GOOGLE_API_KEY")
 MODEL_ID = "gemini-2.5-flash" 
 API_URL = f"https://generativelanguage.googleapis.com/v1/models/{MODEL_ID}:generateContent?key={api_key}"
 
-# --- 3. ЗАГРУЗКА С МЕТАДАННЫМИ ---
+# --- 3. ПОДГОТОВКА ДАННЫХ ---
 @st.cache_resource
-def load_docs():
+def load_docs_with_metadata():
     docs_path = "./docs"
     if not os.path.exists(docs_path) or not os.listdir(docs_path):
         return None
     
     all_chunks = []
-    try:
-        for f in os.listdir(docs_path):
-            if f.endswith(".pdf"):
-                loader = PyPDFLoader(os.path.join(docs_path, f))
-                pages = loader.load()
-                # Мы сохраняем источник в каждом чанке
-                splitter = RecursiveCharacterTextSplitter(chunk_size=1500, chunk_overlap=200)
-                all_chunks.extend(splitter.split_documents(pages))
-        return all_chunks
-    except Exception as e:
-        st.error(f"Ошибка чтения PDF: {e}")
-        return None
+    for f in os.listdir(docs_path):
+        if f.endswith(".pdf"):
+            loader = PyPDFLoader(os.path.join(docs_path, f))
+            pages = loader.load()
+            splitter = RecursiveCharacterTextSplitter(chunk_size=1200, chunk_overlap=150)
+            all_chunks.extend(splitter.split_documents(pages))
+    return all_chunks
 
-chunks = load_docs()
+chunks = load_docs_with_metadata()
 
-def find_context_with_sources(query, chunks):
-    if not chunks: return ""
+def get_engineered_context(query, chunks):
+    if not chunks: return [], ""
     query_words = query.lower().split()
     scored = []
     for c in chunks:
         score = sum(1 for w in query_words if w in c.page_content.lower())
         if score > 0:
-            # Добавляем в текст чанка информацию об источнике
-            source_info = f"\n[ИСТОЧНИК: {c.metadata.get('source', 'Неизвестен')}, Стр. {c.metadata.get('page', 0) + 1}]"
-            scored.append((score, c.page_content + source_info))
+            scored.append((score, c))
     
     scored.sort(key=lambda x: x[0], reverse=True)
-    return "\n\n---\n\n".join([c[1] for c in scored[:8]])
+    top_chunks = scored[:6]
+    
+    context_text = ""
+    raw_data_for_ui = []
+    
+    for score, c in top_chunks:
+        source_name = os.path.basename(c.metadata.get('source', 'unknown'))
+        page_num = c.metadata.get('page', 0) + 1
+        header = f"ДОКУМЕНТ: {source_name} | СТРАНИЦА: {page_num}"
+        
+        context_text += f"\n--- {header} ---\n{c.page_content}\n"
+        raw_data_for_ui.append({"header": header, "content": c.page_content})
+        
+    return raw_data_for_ui, context_text
 
 # --- 4. ИНТЕРФЕЙС ---
-st.title("🛡️ Инженерный Ассистент (Strict Mode)")
-st.caption("Бот обязан цитировать документы и не имеет права на вымысел.")
+st.title("🏗️ Технический контроль документации")
+st.info("Режим: Верификация источников включена. Температура: 0.0 (Strict)")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
 for m in st.session_state.messages:
-    with st.chat_message(m["role"]): st.markdown(m["content"])
+    with st.chat_message(m["role"]):
+        st.markdown(m["content"])
+        if "raw_sources" in m:
+            with st.expander("🔍 Показать исходные выдержки из PDF"):
+                for src in m["raw_sources"]:
+                    st.caption(f"**{src['header']}**")
+                    st.code(src['content'], language=None)
 
-if prompt := st.chat_input("Запросить технические данные..."):
+if prompt := st.chat_input("Введите технический запрос..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"): st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        with st.spinner("Поиск в официальной документации..."):
-            context = find_context_with_sources(prompt, chunks)
-            
-            # ЖЕСТКИЙ ИНЖЕНЕРНЫЙ ПРОМПТ
+        raw_sources, context_for_ai = get_engineered_context(prompt, chunks)
+        
+        with st.spinner("Проверка регламентов..."):
             system_instruction = """
-            ТЫ: Строгий технический эксперт.
-            ТВОЯ ЗАДАЧА: Давать ответы ТОЛЬКО на основе предоставленного КОНТЕКСТА.
-            
-            ПРАВИЛА:
-            1. Если в КОНТЕКСТЕ нет прямого ответа, напиши: "Информация в загруженных документах отсутствует".
-            2. НЕ выдумывай параметры и цифры. 
-            3. К каждому ключевому факту, числу или инструкции ДОБАВЛЯЙ ссылку на источник в формате: (Файл: [название], Стр: [номер]).
-            4. В конце ответа выведи отдельный список "ИСПОЛЬЗОВАННЫЕ РАЗДЕЛЫ", где перечислишь все упомянутые документы и названия разделов (если они есть в тексте).
-            5. Структурируй ответ технически грамотно: таблицы, списки, параметры.
+            Ты — промышленный ИИ-ассистент. Твоя задача — извлекать точные данные из тех-документации.
+            ПРАВИЛА ОТВЕТА:
+            1. Используй ТОЛЬКО предоставленный текст.
+            2. После КАЖДОГО утверждения или цифры ставь ссылку: **[Файл, Стр]**.
+            3. Если информации нет, прямо ответь: "Данные не обнаружены в базе".
+            4. Оформляй списки через дефис, важные параметры выделяй жирным.
             """
             
             payload = {
-                "contents": [{
-                    "parts": [{
-                        "text": f"{system_instruction}\n\nКОНТЕКСТ ДЛЯ АНАЛИЗА:\n{context}\n\nВОПРОС ИНЖЕНЕРА:\n{prompt}"
-                    }]
-                }],
-                "generationConfig": {"temperature": 0.0, "maxOutputTokens": 4000} 
+                "contents": [{"parts": [{"text": f"{system_instruction}\n\nКОНТЕКСТ:\n{context_for_ai}\n\nВОПРОС:\n{prompt}"}]}],
+                "generationConfig": {"temperature": 0.0}
             }
-            # Установили temperature: 0.0 для максимальной точности (убираем творчество)
             
             try:
-                response = requests.post(API_URL, json=payload, timeout=40)
-                if response.status_code == 200:
-                    answer = response.json()['candidates'][0]['content']['parts'][0]['text']
-                else:
-                    answer = "Ошибка доступа к API."
+                response = requests.post(API_URL, json=payload, timeout=30)
+                answer = response.json()['candidates'][0]['content']['parts'][0]['text']
             except:
-                answer = "Ошибка связи."
-        
+                answer = "❌ Ошибка обработки запроса."
+
         st.markdown(answer)
-        st.session_state.messages.append({"role": "assistant", "content": answer})
+        
+        # Добавляем блок верификации
+        with st.expander("🔍 Показать исходные выдержки из PDF"):
+            for src in raw_sources:
+                st.caption(f"**{src['header']}**")
+                st.code(src['content'], language=None)
+        
+        # Сохраняем в историю вместе с источниками
+        st.session_state.messages.append({
+            "role": "assistant", 
+            "content": answer, 
+            "raw_sources": raw_sources
+        })
