@@ -3,9 +3,8 @@ import os
 import google.generativeai as genai
 from langchain_community.document_loaders import PyPDFLoader
 
-# --- 1. НАСТРОЙКА СТРАНИЦЫ И ПАРОЛЬ ---
+# --- 1. ПАРОЛЬ ---
 st.set_page_config(page_title="Technical Assistant", layout="wide")
-
 target_password = st.secrets.get("COMPANY_PASSWORD", "SuperSecret123")
 
 if "auth" not in st.session_state:
@@ -25,20 +24,32 @@ if not api_key:
     st.error("GOOGLE_API_KEY не найден!")
     st.stop()
 
-# ВАЖНО: Мы НЕ используем конфигурацию по умолчанию,
-# а создаем клиент, который будет обращаться к стабильной версии v1
 genai.configure(api_key=api_key)
 
-# Используем полное имя модели, которое поддерживается в v1
-MODEL_NAME = "models/gemini-1.5-flash"
+# ФУНКЦИЯ АВТОПОДБОРА МОДЕЛИ
+@st.cache_resource
+def get_available_model():
+    try:
+        # Просим список всех моделей, доступных вашему ключу
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                # Отдаем приоритет 1.5 flash, если она есть
+                if 'gemini-1.5-flash' in m.name:
+                    return m.name
+        # Если flash не нашли, берем любую первую доступную
+        return genai.list_models()[0].name
+    except Exception as e:
+        st.error(f"Не удалось получить список моделей: {e}")
+        return "models/gemini-pro" # Попытка наугад
 
-# --- 3. ЗАГРУЗКА ТЕКСТА ИЗ PDF ---
+WORKING_MODEL = get_available_model()
+
+# --- 3. ЗАГРУЗКА ТЕКСТА ---
 @st.cache_resource
 def load_all_text():
     docs_path = "./docs"
     if not os.path.exists(docs_path) or not os.listdir(docs_path):
         return ""
-    
     full_text = ""
     try:
         for f in os.listdir(docs_path):
@@ -49,55 +60,39 @@ def load_all_text():
                     full_text += page.page_content + "\n\n"
         return full_text
     except Exception as e:
-        st.error(f"Ошибка чтения PDF: {e}")
         return ""
 
 knowledge_base = load_all_text()
 
-# --- 4. ИНТЕРФЕЙС ЧАТА ---
+# --- 4. ИНТЕРФЕЙС ---
 st.title("🤖 Корпоративный ассистент")
+st.caption(f"Используемая модель: {WORKING_MODEL}")
 
 if not knowledge_base:
-    st.warning("⚠️ Файлы в папке /docs не найдены.")
-else:
-    st.success("✅ Документация загружена.")
+    st.warning("⚠️ Загрузите PDF в папку docs на GitHub.")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
 for m in st.session_state.messages:
-    with st.chat_message(m["role"]):
-        st.markdown(m["content"])
+    with st.chat_message(m["role"]): st.markdown(m["content"])
 
-if prompt := st.chat_input("Спросите что-нибудь..."):
+if prompt := st.chat_input("Ваш вопрос..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
+    with st.chat_message("user"): st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        with st.spinner("Думаю..."):
-            try:
-                # Прямая инициализация модели через стабильный транспорт
-                model = genai.GenerativeModel(model_name=MODEL_NAME)
-                
-                full_prompt = f"""
-                Ты — технический эксперт. Отвечай кратко на основе документов.
-                Документы: {knowledge_base[:300000]}
-                Вопрос: {prompt}
-                """
-                
-                # Принудительно используем генерацию
-                response = model.generate_content(full_prompt)
-                res_text = response.text
-                
-            except Exception as e:
-                # Если 404 всё равно вылезает, попробуем модель без префикса
-                try:
-                    model_fallback = genai.GenerativeModel('gemini-1.5-flash')
-                    response = model_fallback.generate_content(full_prompt)
-                    res_text = response.text
-                except Exception as e2:
-                    res_text = f"Критическая ошибка API: {str(e2)}"
+        try:
+            # Используем найденную модель
+            model = genai.GenerativeModel(WORKING_MODEL)
+            
+            full_prompt = f"Контекст: {knowledge_base[:300000]}\n\nВопрос: {prompt}"
+            
+            # Принудительная генерация
+            response = model.generate_content(full_prompt)
+            res_text = response.text
+        except Exception as e:
+            res_text = f"Ошибка генерации ({WORKING_MODEL}): {str(e)}"
         
         st.markdown(res_text)
         st.session_state.messages.append({"role": "assistant", "content": res_text})
