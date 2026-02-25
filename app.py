@@ -1,16 +1,15 @@
 import streamlit as st
 import os
-import requests
 import json
 import re
+import google.generativeai as genai
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 import streamlit.components.v1 as components
 
-# --- 1. НАСТРОЙКА СТРАНИЦЫ ---
+# --- 1. НАСТРОЙКА ---
 st.set_page_config(page_title="Engineer Verified Pro", layout="wide")
 
-# Функция для кнопки копирования
 def copy_to_clipboard(text, key):
     safe_text = json.dumps(text)
     js_code = f"""
@@ -26,10 +25,23 @@ def copy_to_clipboard(text, key):
     """
     components.html(js_code, height=45)
 
-# --- 2. КОНФИГУРАЦИЯ API ---
+# --- 2. КОНФИГУРАЦИЯ GOOGLE AI ---
 api_key = st.secrets.get("GOOGLE_API_KEY")
-MODEL_ID = "gemini-1.5-flash" 
-API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_ID}:generateContent?key={api_key}"
+genai.configure(api_key=api_key)
+
+# Настройки модели
+generation_config = {
+  "temperature": 0.0,
+  "top_p": 0.95,
+  "top_k": 40,
+  "max_output_tokens": 8192,
+}
+
+# Инициализируем модель (библиотека сама найдет нужный эндпоинт)
+model = genai.GenerativeModel(
+  model_name="gemini-1.5-flash",
+  generation_config=generation_config,
+)
 
 # --- 3. ОБРАБОТКА PDF ---
 @st.cache_resource
@@ -100,26 +112,21 @@ if prompt := st.chat_input("Запросить технические данны
     with st.chat_message("assistant"):
         raw_candidates, context_for_ai = get_context(prompt, chunks)
         with st.spinner("Анализ документации..."):
-            system_instruction = "Отвечай только по контексту. В конце сделай список '### Ссылки на документацию' с новой строки через дефис: - Название, Раздел, стр. №, файл (SOURCE_имя_PAGE_номер). Между ответом и ссылками 2 отступа."
-            payload = {
-                "contents": [{"parts": [{"text": f"{system_instruction}\n\nКОНТЕКСТ:\n{context_for_ai}\n\nВОПРОС:\n{prompt}"}]}],
-                "generationConfig": {"temperature": 0.0}
-            }
+            system_instruction = "Ты инженерный эксперт. Отвечай только по контексту. В конце сделай список '### Ссылки на документацию' с новой строки через дефис: - Название, Раздел, стр. №, файл (SOURCE_имя_PAGE_номер). Между ответом и ссылками 2 отступа."
+            
             try:
-                response = requests.post(API_URL, json=payload, timeout=40)
-                res_json = response.json()
-                if 'error' in res_json:
-                    clean_answer = f"❌ Ошибка API: {res_json['error'].get('message')}"
-                    verified_sources = []
-                elif 'candidates' in res_json:
-                    full_response = res_json['candidates'][0]['content']['parts'][0]['text']
+                # Вызов через официальную библиотеку
+                response = model.generate_content(f"{system_instruction}\n\nКОНТЕКСТ:\n{context_for_ai}\n\nВОПРОС:\n{prompt}")
+                
+                if response.text:
+                    full_response = response.text
                     verified_sources = [s for s in raw_candidates if s['label'] in full_response]
                     clean_answer = re.sub(r'\(SOURCE_.*?_PAGE_.*?\)', '', full_response)
                 else:
                     clean_answer = "⚠️ Ответ заблокирован или пуст."
                     verified_sources = []
             except Exception as e:
-                clean_answer = f"❌ Ошибка связи: {str(e)}"
+                clean_answer = f"❌ Ошибка библиотеки Google AI: {str(e)}"
                 verified_sources = []
 
         st.markdown(clean_answer)
