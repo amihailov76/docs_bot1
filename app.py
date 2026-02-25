@@ -24,15 +24,15 @@ def copy_to_clipboard(text, key):
     </script>"""
     components.html(js_code, height=45)
 
-# --- 2. ПАРАМЕТРЫ МОДЕЛИ (ФИКС 404 И ТАЙМАУТА) ---
+# --- 2. ПАРАМЕТРЫ МОДЕЛИ (ПЕРЕКЛЮЧЕНИЕ НА LITE) ---
 API_KEY = st.secrets.get("GOOGLE_API_KEY")
 
-# Используем конкретное имя из вашего рабочего списка
-# Если 2.0-flash выдаст 429, просто замените на "gemini-1.5-flash" здесь
-SELECTED_MODEL_ID = "gemini-2.0-flash" 
+# 2.0-flash-lite - самая экономная модель из вашего списка, 
+# вероятность получить на ней 429 минимальна.
+SELECTED_MODEL_ID = "gemini-2.0-flash-lite-001" 
 
 def call_gemini(prompt):
-    # Используем v1beta, так как ваш список моделей пришел именно оттуда
+    # Используем v1beta, так как список моделей был оттуда
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{SELECTED_MODEL_ID}:generateContent?key={API_KEY}"
     
     headers = {'Content-Type': 'application/json'}
@@ -45,18 +45,16 @@ def call_gemini(prompt):
     }
     
     try:
-        # Ставим 90 секунд, чтобы точно дождаться ответа
+        # Увеличиваем таймаут, Lite модели иногда "прогреваются"
         res = requests.post(url, headers=headers, json=payload, timeout=90)
         
         if res.status_code == 200:
             return res.json()['candidates'][0]['content']['parts'][0]['text']
-        elif res.status_code == 404:
-            return f"Ошибка 404: Модель {SELECTED_MODEL_ID} не найдена в v1beta. Попробуйте сменить SELECTED_MODEL_ID на 'gemini-1.5-flash'."
         else:
             return f"Ошибка API {res.status_code}: {res.text}"
             
     except requests.exceptions.Timeout:
-        return "Превышено время ожидания (Timeout). Попробуйте задать более короткий вопрос."
+        return "Превышено время ожидания. Попробуйте еще раз через 10 секунд."
     except Exception as e:
         return f"Ошибка соединения: {str(e)}"
 
