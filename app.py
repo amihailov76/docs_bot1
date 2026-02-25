@@ -25,40 +25,60 @@ def copy_to_clipboard(text, key):
     """
     components.html(js_code, height=45)
 
-# --- 2. ИНИЦИАЛИЗАЦИЯ БЕЗ 404 ---
+# --- 2. ИНИЦИАЛИЗАЦИЯ (ФИНАЛЬНЫЙ МЕТОД) ---
 api_key = st.secrets.get("GOOGLE_API_KEY")
 genai.configure(api_key=api_key)
 
 @st.cache_resource
-def get_working_model_instance():
-    variants = ["gemini-1.5-flash", "models/gemini-1.5-flash", "gemini-1.5-flash-latest"]
-    for v in variants:
+def get_final_model():
+    # Мы перебираем имена без префикса 'models/', так как v1beta часто дублирует его
+    test_names = ["gemini-1.5-flash", "gemini-1.5-pro"]
+    
+    # Сначала пытаемся просто создать модель и проверить её работу
+    for name in test_names:
         try:
-            m = genai.GenerativeModel(model_name=v)
-            m.generate_content("test", generation_config={"max_output_tokens": 1})
-            return m, v
-        except Exception as e:
-            if "429" in str(e): return genai.GenerativeModel(model_name=v), v
+            m = genai.GenerativeModel(model_name=name)
+            # Проверочный запрос на 1 токен
+            m.generate_content("hi", generation_config={"max_output_tokens": 1})
+            return m, name
+        except Exception:
             continue
-    return genai.GenerativeModel(model_name="gemini-1.5-flash"), "gemini-1.5-flash"
+            
+    # Если не вышло, пробуем через префикс models/
+    for name in test_names:
+        full_name = f"models/{name}"
+        try:
+            m = genai.GenerativeModel(model_name=full_name)
+            m.generate_content("hi", generation_config={"max_output_tokens": 1})
+            return m, full_name
+        except Exception:
+            continue
+            
+    # Крайний случай: выводим список в логи и берем первый доступный Flash
+    try:
+        models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        for m_name in models:
+            if "1.5-flash" in m_name:
+                return genai.GenerativeModel(model_name=m_name), m_name
+        return genai.GenerativeModel(model_name=models[0]), models[0]
+    except:
+        return genai.GenerativeModel(model_name="gemini-1.5-flash"), "gemini-1.5-flash"
 
-model, ACTIVE_MODEL_NAME = get_working_model_instance()
+model, ACTIVE_MODEL_NAME = get_final_model()
 
-# --- 3. ЛОГИКА PDF ---
-def load_docs_engine():
+# --- 3. ЛОГИКА ДОКУМЕНТОВ ---
+def load_docs():
     docs_path = "./docs"
     if not os.path.exists(docs_path): return []
-    files = [f for f in os.listdir(docs_path) if f.endswith(".pdf")]
     all_chunks = []
-    progress = st.progress(0)
-    for i, f in enumerate(files):
+    files = [f for f in os.listdir(docs_path) if f.endswith(".pdf")]
+    for f in files:
         try:
             loader = PyPDFLoader(os.path.join(docs_path, f))
             pages = loader.load()
             splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
             all_chunks.extend(splitter.split_documents(pages))
         except: continue
-        progress.progress((i + 1) / len(files))
     return all_chunks
 
 if "chunks" not in st.session_state: st.session_state.chunks = None
@@ -69,25 +89,30 @@ st.title("🏗️ MaxPatrol 10: Verified Engineer")
 
 with st.sidebar:
     if st.button("🔄 Обновить базу PDF"):
-        st.session_state.chunks = load_docs_engine()
-    if st.button("🗑️ Очистить чат"):
+        with st.spinner("Загрузка..."):
+            st.session_state.chunks = load_docs()
+            st.success("База обновлена")
+    if st.button("🗑️ Очистить историю"):
         st.session_state.messages = []
         st.rerun()
     st.divider()
-    st.success(f"Движок: `{ACTIVE_MODEL_NAME}`")
+    st.info(f"Активная модель: {ACTIVE_MODEL_NAME}")
 
 def get_context(query, chunks):
     if not chunks: return [], ""
     query_low = query.lower()
     scored = []
+    # Приоритеты из сохраненной инструкции
     priority_keywords = ['adminguide', 'operatorguide', 'implementguide']
+    
     for c in chunks:
         content_low = c.page_content.lower()
-        filename = os.path.basename(c.metadata.get('source', '')).lower()
+        fname = os.path.basename(c.metadata.get('source', '')).lower()
         score = sum(10 for w in query_low.split() if len(w) > 3 and w in content_low)
-        if any(k in filename for k in priority_keywords): score *= 3.0
+        if any(k in fname for k in priority_keywords): score *= 3.0
         else: score *= 0.6
         if score > 0: scored.append((score, c))
+    
     scored.sort(key=lambda x: x[0], reverse=True)
     top = scored[:7]
     raw_data = []; context_text = ""
@@ -103,21 +128,35 @@ for m in st.session_state.messages:
     with st.chat_message(m["role"]): st.markdown(m["content"])
 
 if prompt := st.chat_input("Ваш вопрос..."):
-    if not st.session_state.chunks: st.warning("Обновите базу PDF слева.")
+    if not st.session_state.chunks: st.warning("Сначала обновите базу PDF слева.")
     else:
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"): st.markdown(prompt)
         with st.chat_message("assistant"):
             sources, context = get_context(prompt, st.session_state.chunks)
-            sys_instr = "Ты инженер MP10. Отвечай кратко по контексту. В конце напиши: ИСПОЛЬЗОВАННЫЕ_МЕТКИ: ID_1..."
             try:
-                response = model.generate_content(f"{sys_instr}\n\nКонтекст:\n{context}\n\nВопрос: {prompt}")
-                clean_text = re.sub(r'ИСПОЛЬЗОВАННЫЕ_МЕТКИ:.*', '', response.text).strip()
-                used_ids = re.findall(r'ID_\d+', response.text)
-                verified = [s for s in sources if s['label'] in used_ids] or sources[:1]
-                links = "\n\n**Ссылки:**\n" + "\n".join([f"- {s['file']}, стр. {s['page']}" for s in verified])
-                full_res = clean_text + links
-                st.markdown(full_res)
-                copy_to_clipboard(full_res, "last")
-                st.session_state.messages.append({"role": "assistant", "content": full_res, "sources": verified})
-            except Exception as e: st.error(f"Ошибка API: {e}")
+                # ВНИМАНИЕ: Убираем system_instruction из параметров модели, пишем всё в один промпт
+                full_prompt = (
+                    f"Ты инженер техподдержки MaxPatrol 10. Отвечай только по контексту. "
+                    f"Если есть шаги, пиши по порядку. В конце укажи: ИСПОЛЬЗОВАННЫЕ_МЕТКИ: ID_1, ID_2\n\n"
+                    f"КОНТЕКСТ:\n{context}\n\nВОПРОС: {prompt}"
+                )
+                response = model.generate_content(full_prompt)
+                
+                res_text = response.text
+                clean_ans = re.sub(r'ИСПОЛЬЗОВАННЫЕ_МЕТКИ:.*', '', res_text).strip()
+                ids = re.findall(r'ID_\d+', res_text)
+                verified = [s for s in sources if s['label'] in ids] or sources[:1]
+                
+                links = "\n\n**Источники:**\n" + "\n".join([f"- {s['file']}, стр. {s['page']}" for s in verified])
+                final = clean_ans + links
+                st.markdown(final)
+                copy_to_clipboard(final, "final_copy")
+                st.session_state.messages.append({"role": "assistant", "content": final})
+            except Exception as e:
+                st.error(f"Ошибка API: {e}")
+                # Выводим список доступных моделей при ошибке для диагностики
+                try:
+                    available = [m.name for m in genai.list_models()]
+                    st.write("Доступные вам модели:", available)
+                except: pass
