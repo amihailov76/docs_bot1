@@ -25,22 +25,31 @@ def copy_to_clipboard(text, key):
     """
     components.html(js_code, height=45)
 
-# --- 2. КОНФИГУРАЦИЯ GOOGLE AI ---
+# --- 2. КОНФИГУРАЦИЯ GOOGLE AI С АВТОПОДБОРОМ ---
 api_key = st.secrets.get("GOOGLE_API_KEY")
 genai.configure(api_key=api_key)
 
-# Настройки модели
-generation_config = {
-  "temperature": 0.0,
-  "top_p": 0.95,
-  "top_k": 40,
-  "max_output_tokens": 8192,
-}
+@st.cache_resource
+def get_working_model():
+    """Диагностика: ищем модель, которая поддерживает генерацию текста"""
+    try:
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                # Отдаем приоритет flash моделям
+                if "flash" in m.name:
+                    return m.name
+        # Если flash не нашли, берем любую первую доступную
+        return "gemini-1.5-pro" 
+    except Exception as e:
+        st.error(f"Не удалось получить список моделей: {e}")
+        return "gemini-1.5-flash" # фолбек
 
-# Инициализируем модель (библиотека сама найдет нужный эндпоинт)
+WORKING_MODEL_NAME = get_working_model()
+st.sidebar.write(f"🤖 Используемая модель: `{WORKING_MODEL_NAME}`")
+
 model = genai.GenerativeModel(
-  model_name="gemini-1.5-flash",
-  generation_config=generation_config,
+  model_name=WORKING_MODEL_NAME,
+  generation_config={"temperature": 0.0}
 )
 
 # --- 3. ОБРАБОТКА PDF ---
@@ -115,9 +124,7 @@ if prompt := st.chat_input("Запросить технические данны
             system_instruction = "Ты инженерный эксперт. Отвечай только по контексту. В конце сделай список '### Ссылки на документацию' с новой строки через дефис: - Название, Раздел, стр. №, файл (SOURCE_имя_PAGE_номер). Между ответом и ссылками 2 отступа."
             
             try:
-                # Вызов через официальную библиотеку
                 response = model.generate_content(f"{system_instruction}\n\nКОНТЕКСТ:\n{context_for_ai}\n\nВОПРОС:\n{prompt}")
-                
                 if response.text:
                     full_response = response.text
                     verified_sources = [s for s in raw_candidates if s['label'] in full_response]
@@ -126,7 +133,7 @@ if prompt := st.chat_input("Запросить технические данны
                     clean_answer = "⚠️ Ответ заблокирован или пуст."
                     verified_sources = []
             except Exception as e:
-                clean_answer = f"❌ Ошибка библиотеки Google AI: {str(e)}"
+                clean_answer = f"❌ Ошибка ИИ: {str(e)}"
                 verified_sources = []
 
         st.markdown(clean_answer)
