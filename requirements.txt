@@ -2,4 +2,4 @@ streamlit
 langchain-community
 pypdf
 requests
-google-generativeai
+google-genai
