@@ -6,20 +6,9 @@ from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # --- 1. НАСТРОЙКА ---
-st.set_page_config(page_title="Engineer Verified Pro", layout="wide")
+st.set_page_config(page_title="Engineer Verified Pro (Public)", layout="wide")
 
-# Проверка пароля
-target_password = st.secrets.get("COMPANY_PASSWORD", "123")
-if "auth" not in st.session_state:
-    st.title("🔐 Авторизация")
-    pwd = st.text_input("Введите инженерный пароль", type="password")
-    if st.button("Войти"):
-        if pwd == target_password:
-            st.session_state.auth = True
-            st.rerun()
-        else:
-            st.error("Доступ запрещен")
-    st.stop()
+# (Блок пароля удален)
 
 # --- 2. КОНФИГУРАЦИЯ API ---
 api_key = st.secrets.get("GOOGLE_API_KEY")
@@ -59,7 +48,7 @@ def get_context(query, chunks):
             scored.append((score, c))
     
     scored.sort(key=lambda x: x[0], reverse=True)
-    top_chunks = scored[:8] # Берем до 8 кандидатов
+    top_chunks = scored[:8]
     
     raw_data = []
     context_text = ""
@@ -71,8 +60,8 @@ def get_context(query, chunks):
     return raw_data, context_text
 
 # --- 4. ИНТЕРФЕЙС ---
-st.title("🏗️ Технический контроль (Strict & Full View)")
-st.info("Бот фильтрует исходники согласно финальным ссылкам. Полный лог доступен по запросу.")
+st.title("🏗️ Технический контроль (Общий доступ)")
+st.info("Бот доступен без пароля. Режим верификации источников активен.")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -100,16 +89,15 @@ if prompt := st.chat_input("Запросить данные..."):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        # 1. Поиск всех кандидатов
         all_found, context_for_ai = get_context(prompt, chunks)
         
-        with st.spinner("Анализ и фильтрация источников..."):
+        with st.spinner("Анализ документации..."):
             system_instruction = """
             Ты — промышленный ИИ-эксперт. 
             Отвечай ТОЛЬКО по контексту. 
             В конце ВСЕГДА пиши раздел '### Ссылки на документацию'.
             Каждая ссылка должна быть строго в формате: 'Файл: [имя], Стр: [номер]'.
-            Не используй ссылки в тексте, только в финальном списке.
+            Не используй ссылки в тексте.
             """
             
             payload = {
@@ -120,8 +108,6 @@ if prompt := st.chat_input("Запросить данные..."):
             try:
                 response = requests.post(API_URL, json=payload, timeout=40)
                 answer = response.json()['candidates'][0]['content']['parts'][0]['text']
-                
-                # 2. ФИЛЬТРАЦИЯ: оставляем только те чанки, которые ИИ упомянул в тексте
                 verified_sources = [s for s in all_found if s['header'] in answer]
             except:
                 answer = "❌ Ошибка связи с API."
@@ -129,7 +115,6 @@ if prompt := st.chat_input("Запросить данные..."):
 
         st.markdown(answer)
         
-        # 3. Вывод блоков сразу
         if verified_sources:
             with st.expander("✅ Подтверждающие выдержки"):
                 for src in verified_sources:
@@ -141,7 +126,6 @@ if prompt := st.chat_input("Запросить данные..."):
                 st.caption(f"**{src['header']}**")
                 st.text(src['content'])
         
-        # Сохранение
         st.session_state.messages.append({
             "role": "assistant", 
             "content": answer, 
