@@ -83,10 +83,14 @@ def get_context(query, chunks):
     for i, (_, c) in enumerate(top_chunks):
         filename = os.path.basename(c.metadata.get('source', 'unknown'))
         page_num = c.metadata.get('page', 0) + 1
-        # Короткая метка исключает ошибки парсинга
-        label = f"ID_{i+1}" 
+        label = f"ID_{i+1}"
+        
+        # Предварительно формируем строку ссылки, чтобы ИИ её просто скопировал
+        doc_title = filename.replace('.pdf', '').replace('_', ' ').title()
+        ref_link = f"{doc_title}, [УКАЖИ_РАЗДЕЛ], стр. {page_num}, {filename}"
+        
         raw_data.append({"label": label, "content": c.page_content, "file": filename, "page": page_num})
-        context_text += f"\n--- ИСТОЧНИК {label} ---\n{c.page_content}\n"
+        context_text += f"\n--- ИСТОЧНИК {label} ---\nССЫЛКА ДЛЯ КОПИРОВАНИЯ: {ref_link}\nТЕКСТ:\n{c.page_content}\n"
     return raw_data, context_text
 
 # --- 4. ИНТЕРФЕЙС ---
@@ -123,10 +127,10 @@ if prompt := st.chat_input("Запросить технические данны
                 "Ты инженерный эксперт. Отвечай только на основе контекста.\n"
                 "ТРЕБОВАНИЯ К ФОРМАТУ ССЫЛОК:\n"
                 "1. В конце ответа создай раздел '### Ссылки на документацию'.\n"
-                "2. Каждая ссылка с новой строки.\n"
-                "3. Формат: Название документа, Название раздела, стр. Номер, имя_файла.pdf ID_X\n"
-                "4. ЗАПРЕЩЕНО: использовать кавычки, дублировать файлы или страницы, использовать скобки вокруг ID.\n"
-                "5. ID_X должен соответствовать номеру источника из контекста."
+                "2. Для каждого использованного источника скопируй строку 'ССЫЛКА ДЛЯ КОПИРОВАНИЯ' из контекста.\n"
+                "3. В скопированной строке замени '[УКАЖИ_РАЗДЕЛ]' на название раздела из текста.\n"
+                "4. В самый конец каждой строки ссылки добавь метку ID_X (без скобок).\n"
+                "5. ЗАПРЕЩЕНО: менять порядок слов в ссылке, использовать кавычки, ставить точки в конце ссылки."
             )
             
             try:
@@ -135,21 +139,16 @@ if prompt := st.chat_input("Запросить технические данны
                 if response.text:
                     full_text = response.text
                     
-                    # Логика сбора пруфов
-                    verified_sources = []
-                    for s in raw_candidates:
-                        if s['label'] in full_text:
-                            verified_sources.append(s)
+                    # Сбор пруфов для зеленого блока
+                    verified_sources = [s for s in raw_candidates if s['label'] in full_text]
                     
-                    # ФИНАЛЬНАЯ ОЧИСТКА ТЕКСТА
-                    # 1. Удаляем метки ID_X
+                    # Если ИИ не указал метки, берем топ-1 для надежности
+                    if not verified_sources and raw_candidates:
+                        verified_sources = [raw_candidates[0]]
+
+                    # ОЧИСТКА: Удаляем технические метки ID_X и лишние артефакты
                     clean_text = re.sub(r'\sID_\d+', '', full_text)
-                    # 2. Удаляем любые висячие скобки в конце строк, которые мог добавить ИИ
-                    clean_lines = []
-                    for line in clean_text.split('\n'):
-                        clean_lines.append(re.sub(r'\s*\(.*?\)\s*$', '', line))
-                    
-                    final_answer = '\n'.join(clean_lines).strip()
+                    final_answer = clean_text.strip()
                 else:
                     final_answer = "⚠️ Ответ пуст."
                     verified_sources = []
