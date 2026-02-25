@@ -2,11 +2,12 @@ import streamlit as st
 import os
 import requests
 import json
+import re
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # --- 1. НАСТРОЙКА ---
-st.set_page_config(page_title="Engineer Verified Pro (Public)", layout="wide")
+st.set_page_config(page_title="Engineer Verified Pro", layout="wide")
 
 # --- 2. КОНФИГУРАЦИЯ API ---
 api_key = st.secrets.get("GOOGLE_API_KEY")
@@ -27,7 +28,7 @@ def load_docs_engine():
         try:
             loader = PyPDFLoader(os.path.join(docs_path, f))
             pages = loader.load()
-            # Чанки чуть больше, чтобы захватить заголовки разделов
+            # Увеличенный размер чанка, чтобы ИИ видел заголовки разделов
             splitter = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=300)
             all_chunks.extend(splitter.split_documents(pages))
         except Exception as e:
@@ -52,32 +53,48 @@ def get_context(query, chunks):
     raw_data = []
     context_text = ""
     for _, c in top_chunks:
-        filename = os.path.basename(c.metadata['source'])
-        page_num = c.metadata['page'] + 1
-        # Метка для поиска в ответе
-        label = f"{filename}_p{page_num}"
+        filename = os.path.basename(c.metadata.get('source', 'unknown'))
+        page_num = c.metadata.get('page', 0) + 1
+        # Метка для сопоставления (без пробелов для надежности re.sub)
+        label = f"SOURCE_{filename}_PAGE_{page_num}".replace(" ", "_")
         
-        raw_data.append({"label": label, "content": c.page_content, "file": filename, "page": page_num})
-        context_text += f"\n--- ИСТОЧНИК: {label} ---\n{c.page_content}\n"
+        raw_data.append({
+            "label": label, 
+            "content": c.page_content, 
+            "file": filename, 
+            "page": page_num
+        })
+        context_text += f"\n--- ИСТОЧНИК_МЕТКА: {label} ---\n{c.page_content}\n"
         
     return raw_data, context_text
 
 # --- 4. ИНТЕРФЕЙС ---
-st.title("🏗️ Технический контроль (Общий доступ)")
-st.info("Режим: Чистый текст + Детальные ссылки. Кнопка 'Показать всё' удалена.")
+st.title("🏗️ Технический контроль")
+
+# Кнопка очистки истории (помогает при смене структуры данных)
+if st.sidebar.button("Очистить историю чата"):
+    st.session_state.messages = []
+    st.rerun()
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
+# Отрисовка истории
 for i, m in enumerate(st.session_state.messages):
     with st.chat_message(m["role"]):
         st.markdown(m["content"])
-        if "verified_sources" in m and m["verified_sources"]:
-            with st.expander(f"✅ Подтверждающие выдержки (к ответу №{i//2 + 1})"):
-                for src in m["verified_sources"]:
-                    st.success(f"**Источник: {src['file']}, стр. {src['page']}**")
-                    st.text(src['content'])
+        
+        # Безопасное отображение источников через .get()
+        verified = m.get("verified_sources", [])
+        if verified:
+            with st.expander(f"✅ Подтверждающие выдержки"):
+                for src in verified:
+                    f_name = src.get('file', 'Неизвестный файл')
+                    p_num = src.get('page', '?')
+                    st.success(f"**Источник: {f_name}, стр. {p_num}**")
+                    st.text(src.get('content', 'Текст не найден'))
 
+# Поле ввода
 if prompt := st.chat_input("Запросить данные..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
@@ -93,12 +110,8 @@ if prompt := st.chat_input("Запросить данные..."):
             ФОРМАТ ССЫЛОК В КОНЦЕ:
             1. Создай раздел '### Ссылки на документацию'.
             2. Каждый источник пиши С НОВОЙ СТРОКИ.
-            3. Шаблон ссылки: <Название документа>, <Номер и название раздела>, стр. <номер>, <имя PDF-файла>.
-               Пример: Руководство администратора, 5.1 Создание правила, стр. 34, manual.pdf
-            4. Если название раздела не найдено в тексте, пиши 'Раздел не указан'.
-            5. Название документа бери из самого текста или имени файла.
-            
-            Для связи источников с выдержками, обязательно в конце каждой строки ссылки в скобках укажи техническую метку файла (например: (FILENAME_pPAGE)).
+            3. Формат: <Название документа>, <Номер и название раздела>, стр. <номер>, <имя PDF-файла>.
+            4. В самом конце строки ссылки ОБЯЗАТЕЛЬНО добавь метку в скобках, например: (SOURCE_filename.pdf_PAGE_12).
             """
             
             payload = {
@@ -108,17 +121,16 @@ if prompt := st.chat_input("Запросить данные..."):
             
             try:
                 response = requests.post(API_URL, json=payload, timeout=40)
-                answer = response.json()['candidates'][0]['content']['parts'][0]['text']
+                full_response = response.json()['candidates'][0]['content']['parts'][0]['text']
                 
-                # Фильтрация только подтвержденных выдержек
-                verified_sources = [s for s in raw_candidates if s['label'] in answer]
+                # Фильтруем выдержки: ищем метку label в тексте ответа
+                verified_sources = [s for s in raw_candidates if s['label'] in full_response]
                 
-                # Очищаем ответ от технических меток (типа FILENAME_pPAGE), если ИИ их вывел в скобках
-                import re
-                clean_answer = re.sub(r'\(.*\.pdf_p\d+\)', '', answer)
+                # Очищаем финальный текст от технических меток (SOURCE_...)
+                clean_answer = re.sub(r'\(SOURCE_.*?_PAGE_.*?\)', '', full_response)
                 
-            except:
-                clean_answer = "❌ Ошибка связи с API."
+            except Exception as e:
+                clean_answer = f"❌ Ошибка: {str(e)}"
                 verified_sources = []
 
         st.markdown(clean_answer)
