@@ -24,29 +24,39 @@ def copy_to_clipboard(text, key):
     </script>"""
     components.html(js_code, height=45)
 
-# --- 2. ПАРАМЕТРЫ МОДЕЛИ ---
+# --- 2. ПАРАМЕТРЫ МОДЕЛИ (ФИКС 404 И ТАЙМАУТА) ---
 API_KEY = st.secrets.get("GOOGLE_API_KEY")
-CLEAN_MODEL_NAME = "gemini-flash-latest"
+
+# Используем конкретное имя из вашего рабочего списка
+# Если 2.0-flash выдаст 429, просто замените на "gemini-1.5-flash" здесь
+SELECTED_MODEL_ID = "gemini-2.0-flash" 
 
 def call_gemini(prompt):
-    # Используем v1 для стабильности, если v1beta тормозит
-    url = f"https://generativelanguage.googleapis.com/v1/models/{CLEAN_MODEL_NAME}:generateContent?key={API_KEY}"
+    # Используем v1beta, так как ваш список моделей пришел именно оттуда
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{SELECTED_MODEL_ID}:generateContent?key={API_KEY}"
     
     headers = {'Content-Type': 'application/json'}
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 2048}
+        "generationConfig": {
+            "temperature": 0.1,
+            "maxOutputTokens": 2048
+        }
     }
     
     try:
-        # Увеличиваем timeout до 90 секунд
+        # Ставим 90 секунд, чтобы точно дождаться ответа
         res = requests.post(url, headers=headers, json=payload, timeout=90)
+        
         if res.status_code == 200:
             return res.json()['candidates'][0]['content']['parts'][0]['text']
+        elif res.status_code == 404:
+            return f"Ошибка 404: Модель {SELECTED_MODEL_ID} не найдена в v1beta. Попробуйте сменить SELECTED_MODEL_ID на 'gemini-1.5-flash'."
         else:
             return f"Ошибка API {res.status_code}: {res.text}"
+            
     except requests.exceptions.Timeout:
-        return "Ошибка: Сервер Google слишком долго думал. Попробуйте упростить запрос или уменьшить базу."
+        return "Превышено время ожидания (Timeout). Попробуйте задать более короткий вопрос."
     except Exception as e:
         return f"Ошибка соединения: {str(e)}"
 
