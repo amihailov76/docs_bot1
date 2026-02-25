@@ -87,7 +87,7 @@ def get_context(query, chunks):
     return raw_data, context_text
 
 # --- 4. ИНТЕРФЕЙС ---
-st.title("🏗️ MaxPatrol 10: Verified Engineer (Groq Speed)")
+st.title("🏗️ MaxPatrol SIEM: Помощник пользователя")
 
 if st.sidebar.button("Очистить историю чата"):
     st.session_state.messages = []
