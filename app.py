@@ -50,9 +50,6 @@ def call_gemini(prompt):
     except Exception as e:
         return f"Ошибка соединения: {str(e)}"
 
-# --- КОРРЕКТИРОВКА В ФУНКЦИИ get_context ---
-# Найдите строку top = scored[:6] и замените на 4, чтобы уменьшить объем данных
-top = scored[:4]
 # --- 3. ОБРАБОТКА ДОКУМЕНТОВ ---
 @st.cache_resource
 def load_docs():
@@ -88,7 +85,7 @@ def get_context(query, chunks):
         if score > 0: scored.append((score, c))
             
     scored.sort(key=lambda x: x[0], reverse=True)
-    top = scored[:6]
+    top = scored[:4]
     
     raw = []; ctx_text = ""
     for i, (_, c) in enumerate(top):
