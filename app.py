@@ -25,18 +25,38 @@ def copy_to_clipboard(text, key):
     """
     components.html(js_code, height=45)
 
-# --- 2. КОНФИГУРАЦИЯ API (ЖЕСТКАЯ ФИКСАЦИЯ) ---
+# --- 2. КОНФИГУРАЦИЯ API (АДАПТИВНАЯ МОДЕЛЬ) ---
 api_key = st.secrets.get("GOOGLE_API_KEY")
 genai.configure(api_key=api_key)
 
-# ЖЕСТКО ФИКСИРУЕМ МОДЕЛЬ ДЛЯ ОБХОДА ОШИБКИ 429 (GEMINI 2.5) И 404
-WORKING_MODEL_NAME = "models/gemini-1.5-flash"
-st.sidebar.success(f"🤖 Стабильный движок: `1.5-flash`")
+# Функция для безопасного создания модели
+def initialize_model():
+    # Список возможных имен для Gemini 1.5 Flash в разных версиях API
+    model_variants = ["gemini-1.5-flash", "models/gemini-1.5-flash", "gemini-1.5-flash-latest"]
+    
+    for model_name in model_variants:
+        try:
+            m = genai.GenerativeModel(model_name=model_name, generation_config={"temperature": 0.1})
+            # Пробный вызов (минимальный), чтобы проверить доступность
+            m.generate_content("test", generation_config={"max_output_tokens": 1})
+            return m, model_name
+        except Exception:
+            continue
+    
+    # Если ни один вариант не сработал, пробуем получить список через API
+    try:
+        available = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        # Берем первую, где есть "1.5-flash", но нет "2.0" или "2.5"
+        for a in available:
+            if "1.5-flash" in a and "2." not in a:
+                return genai.GenerativeModel(model_name=a, generation_config={"temperature": 0.1}), a
+        return genai.GenerativeModel(model_name=available[0]), available[0]
+    except:
+        # Последний рубеж
+        return genai.GenerativeModel(model_name="gemini-1.5-flash"), "gemini-1.5-flash"
 
-model = genai.GenerativeModel(
-    model_name=WORKING_MODEL_NAME,
-    generation_config={"temperature": 0.1}
-)
+model, active_model_name = initialize_model()
+st.sidebar.success(f"🤖 Движок: `{active_model_name}`")
 
 # --- 3. ОБРАБОТКА PDF С ПРИОРИТЕТАМИ ---
 @st.cache_resource
@@ -50,7 +70,6 @@ def load_docs_engine():
         try:
             loader = PyPDFLoader(os.path.join(docs_path, f))
             pages = loader.load()
-            # Чанки по 1000 знаков для лучшей точности
             splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
             all_chunks.extend(splitter.split_documents(pages))
         except Exception as e:
@@ -65,7 +84,7 @@ def get_context(query, chunks):
     query_words = [w for w in query_low.split() if len(w) > 3]
     scored = []
     
-    # ПРИОРИТЕТЫ ИЗ ВАШЕЙ ИНСТРУКЦИИ
+    # ПРИОРИТЕТЫ: adminguide, operatorguide, implementguide
     priority_keywords = ['adminguide', 'operatorguide', 'implementguide']
     
     for c in chunks:
@@ -79,18 +98,18 @@ def get_context(query, chunks):
             if w in content_low:
                 score += 10
         
-        # Взвешивание источников
+        # Приоритезация файлов
         is_priority = any(k in filename_low for k in priority_keywords)
         if is_priority:
-            score *= 3.0  # Утроенный вес для руководств админа/оператора
+            score *= 3.0
         else:
-            score *= 0.6  # Сниженный вес для справочников
+            score *= 0.6
         
         if score > 0:
             scored.append((score, c))
     
     scored.sort(key=lambda x: x[0], reverse=True)
-    top_chunks = scored[:8] # Увеличили до 8 кусков для полноты ответа
+    top_chunks = scored[:8]
     
     raw_data = []
     context_text = ""
@@ -99,22 +118,18 @@ def get_context(query, chunks):
         page_num = c.metadata.get('page', 0) + 1
         label = f"ID_{i+1}"
         
-        # Берем заголовок из первой строки текста
         lines = [l.strip() for l in c.page_content.split('\n') if len(l.strip()) > 5]
         section = lines[0] if lines else "Технический раздел"
         
         raw_data.append({
-            "label": label, 
-            "content": c.page_content, 
-            "file": filename, 
-            "page": page_num,
-            "section": section
+            "label": label, "content": c.page_content, 
+            "file": filename, "page": page_num, "section": section
         })
         context_text += f"\n--- ИСТОЧНИК {label} ---\n{c.page_content}\n"
     return raw_data, context_text
 
 # --- 4. ИНТЕРФЕЙС ---
-st.title("🏗️ MaxPatrol SIEM: помощник пользователя")
+st.title("🏗️ MaxPatrol 10: Verified Engineer")
 
 if st.sidebar.button("Очистить историю"):
     st.session_state.messages = []
@@ -133,7 +148,7 @@ for i, m in enumerate(st.session_state.messages):
                     for src in m["verified_sources"]:
                         st.info(f"**{src['file']}, стр. {src['page']}**\n\n{src['content']}")
 
-if prompt := st.chat_input("Запрос к документации MaxPatrol 10..."):
+if prompt := st.chat_input("Запрос к документации..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
@@ -141,15 +156,15 @@ if prompt := st.chat_input("Запрос к документации MaxPatrol 1
     with st.chat_message("assistant"):
         raw_candidates, context_for_ai = get_context(prompt, chunks)
         
-        with st.spinner("Поиск инструкций..."):
+        with st.spinner("Анализирую источники..."):
             system_instruction = (
-                "Ты — эксперт техподдержки MaxPatrol 10. Твоя задача — найти ПРЯМУЮ инструкцию в тексте. "
-                "Если в предоставленных фрагментах есть описание действий, шаги или параметры — перечисли их. "
-                "Если информации недостаточно, так и скажи, но попытайся найти максимально близкие данные. "
-                "В самом конце напиши только: ИСПОЛЬЗОВАННЫЕ_МЕТКИ: ID_1, ID_2 и т.д."
+                "Ты техподдержка MaxPatrol 10. Отвечай строго по контексту. "
+                "Если есть шаги настройки — выпиши их. В конце укажи: "
+                "ИСПОЛЬЗОВАННЫЕ_МЕТКИ: ID_1, ID_2"
             )
             
             try:
+                # ВАЖНО: Мы используем ранее проинициализированную модель
                 response = model.generate_content(f"{system_instruction}\n\nКОНТЕКСТ:\n{context_for_ai}\n\nВОПРОС:\n{prompt}")
                 
                 if response.text:
@@ -157,39 +172,31 @@ if prompt := st.chat_input("Запрос к документации MaxPatrol 1
                     used_labels = re.findall(r'ID_\d+', raw_answer)
                     verified_sources = [s for s in raw_candidates if s['label'] in used_labels]
                     
-                    # Пруфы всегда должны быть, даже если ИИ забыл метки
                     if not verified_sources and raw_candidates:
                         verified_sources = [raw_candidates[0]]
 
                     clean_answer = re.sub(r'ИСПОЛЬЗОВАННЫЕ_МЕТКИ:.*', '', raw_answer).strip()
                     
-                    # Сборка ссылок (программная)
+                    # Форматирование ссылок
                     links_block = "\n\n### Ссылки на документацию\n"
-                    if verified_sources:
-                        for src in verified_sources:
-                            doc_title = src['file'].replace('_', ' ').replace('.pdf', '').title()
-                            links_block += f"- {doc_title}, {src['section']}, стр. {src['page']}, {src['file']}\n"
-                    else:
-                        links_block = "\n\n*Документация по данному вопросу не найдена.*"
+                    for src in verified_sources:
+                        doc_title = src['file'].replace('_', ' ').replace('.pdf', '').title()
+                        links_block += f"- {doc_title}, {src['section']}, стр. {src['page']}, {src['file']}\n"
                     
                     final_answer = clean_answer + links_block
                 else:
-                    final_answer = "Ошибка обработки данных."
+                    final_answer = "Ошибка генерации. Попробуйте еще раз."
                     verified_sources = []
             except Exception as e:
-                final_answer = f"❌ Ошибка (проверьте API-ключ или подождите 1 минуту): {str(e)}"
+                final_answer = f"❌ Системная ошибка: {str(e)}"
                 verified_sources = []
 
         st.markdown(final_answer)
-        copy_to_clipboard(final_answer, "new_msg")
+        copy_to_clipboard(final_answer, "new")
         
         if verified_sources:
-            with st.expander("✅ Подтверждающие выдержки", expanded=False):
+            with st.expander("✅ Подтверждающие выдержки"):
                 for src in verified_sources:
                     st.info(f"**{src['file']}, стр. {src['page']}**\n\n{src['content']}")
         
-        st.session_state.messages.append({
-            "role": "assistant", 
-            "content": final_answer, 
-            "verified_sources": verified_sources
-        })
+        st.session_state.messages.append({"role": "assistant", "content": final_answer, "verified_sources": verified_sources})
