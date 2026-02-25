@@ -31,21 +31,17 @@ genai.configure(api_key=api_key)
 
 @st.cache_resource
 def get_working_model():
-    """Диагностика: ищем модель, которая поддерживает генерацию текста"""
     try:
         for m in genai.list_models():
             if 'generateContent' in m.supported_generation_methods:
-                # Отдаем приоритет flash моделям
                 if "flash" in m.name:
                     return m.name
-        # Если flash не нашли, берем любую первую доступную
-        return "gemini-1.5-pro" 
+        return "gemini-1.5-flash" 
     except Exception as e:
-        st.error(f"Не удалось получить список моделей: {e}")
-        return "gemini-1.5-flash" # фолбек
+        return "gemini-1.5-flash"
 
 WORKING_MODEL_NAME = get_working_model()
-st.sidebar.write(f"🤖 Используемая модель: `{WORKING_MODEL_NAME}`")
+st.sidebar.write(f"🤖 Модель: `{WORKING_MODEL_NAME}`")
 
 model = genai.GenerativeModel(
   model_name=WORKING_MODEL_NAME,
@@ -121,14 +117,23 @@ if prompt := st.chat_input("Запросить технические данны
     with st.chat_message("assistant"):
         raw_candidates, context_for_ai = get_context(prompt, chunks)
         with st.spinner("Анализ документации..."):
-            system_instruction = "Ты инженерный эксперт. Отвечай только по контексту. В конце сделай список '### Ссылки на документацию' с новой строки через дефис: - Название, Раздел, стр. №, файл (SOURCE_имя_PAGE_номер). Между ответом и ссылками 2 отступа."
+            system_instruction = (
+                "Ты инженерный эксперт. Отвечай только по контексту. "
+                "В конце сделай список '### Ссылки на документацию' с новой строки через дефис: "
+                "- <Название>, <Раздел>, стр. <№>, <файл> (SOURCE_<имя>_PAGE_<номер>). "
+                "Метка SOURCE_ должна быть в конце каждой строки. Между ответом и ссылками 2 отступа."
+            )
             
             try:
                 response = model.generate_content(f"{system_instruction}\n\nКОНТЕКСТ:\n{context_for_ai}\n\nВОПРОС:\n{prompt}")
                 if response.text:
                     full_response = response.text
+                    
+                    # ГИБКОЕ СОПОСТАВЛЕНИЕ: ищем наличие метки в тексте
                     verified_sources = [s for s in raw_candidates if s['label'] in full_response]
-                    clean_answer = re.sub(r'\(SOURCE_.*?_PAGE_.*?\)', '', full_response)
+                    
+                    # ОЧИСТКА: удаляем технические метки (SOURCE_...) из финального текста
+                    clean_answer = re.sub(r'\(?SOURCE_.*?_PAGE_.*?\)?', '', full_response).strip()
                 else:
                     clean_answer = "⚠️ Ответ заблокирован или пуст."
                     verified_sources = []
@@ -138,9 +143,15 @@ if prompt := st.chat_input("Запросить технические данны
 
         st.markdown(clean_answer)
         copy_to_clipboard(clean_answer, "new_msg")
+        
         if verified_sources:
-            with st.expander("✅ Подтверждающие выдержки"):
+            with st.expander("✅ Подтверждающие выдержки", expanded=False):
                 for src in verified_sources:
                     st.success(f"**Файл: {src['file']}, Стр: {src['page']}**")
                     st.text(src['content'])
-        st.session_state.messages.append({"role": "assistant", "content": clean_answer, "verified_sources": verified_sources})
+        
+        st.session_state.messages.append({
+            "role": "assistant", 
+            "content": clean_answer, 
+            "verified_sources": verified_sources
+        })
