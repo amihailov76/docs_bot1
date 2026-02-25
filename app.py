@@ -108,6 +108,7 @@ for i, m in enumerate(st.session_state.messages):
         st.markdown(m["content"])
         if m["role"] == "assistant":
             copy_to_clipboard(m["content"], f"msg_{i}")
+            st.caption("⚠️ Ответ сгенерирован ИИ на базе Llama 3.3 и может содержать ошибки. Всегда сверяйте важные параметры с оригинальной документацией.")
             verified = m.get("verified_sources", [])
             if verified:
                 with st.expander(f"✅ Подтверждающие выдержки из документов"):
