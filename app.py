@@ -26,9 +26,9 @@ def copy_to_clipboard(text, key):
     """
     components.html(js_code, height=45)
 
-# --- 2. ИНИЦИАЛИЗАЦИЯ (ПРИНУДИТЕЛЬНАЯ ВЕРСИЯ V1) ---
+# --- 2. ИНИЦИАЛИЗАЦИЯ (СТАБИЛЬНАЯ V1) ---
 api_key = st.secrets.get("GOOGLE_API_KEY")
-# Фиксируем версию API v1 для стабильности
+# Используем v1 для исключения 404
 client = genai.Client(api_key=api_key, http_options={'api_version': 'v1'})
 STABLE_MODEL_ID = "gemini-1.5-flash"
 
@@ -63,12 +63,13 @@ with st.sidebar:
         st.session_state.messages = []
         st.rerun()
     st.divider()
-    st.success(f"Движок: `{STABLE_MODEL_ID}` (v1)")
+    st.success(f"Движок: `{STABLE_MODEL_ID}`")
 
 def get_context(query, chunks):
     if not chunks: return [], ""
     q = query.lower()
     scored = []
+    # Ваши приоритеты из сохраненной инструкции
     priority = ['adminguide', 'operatorguide', 'implementguide']
     for c in chunks:
         txt = c.page_content.lower()
@@ -98,15 +99,21 @@ if prompt := st.chat_input("Ваш запрос..."):
         with st.chat_message("assistant"):
             sources, context = get_context(prompt, st.session_state.chunks)
             try:
-                config = types.GenerateContentConfig(
-                    system_instruction="Ты инженер MP10. Отвечай кратко по контексту. В конце напиши: ИСПОЛЬЗОВАННЫЕ_МЕТКИ: ID_1...",
-                    temperature=0.1
+                # ПЕРЕНОСИМ ИНСТРУКЦИЮ ВНУТРЬ CONTENTS (ФИКС 400)
+                full_prompt = (
+                    "ИНСТРУКЦИЯ: Ты инженер техподдержки MaxPatrol 10. Отвечай кратко и только на основе контекста. "
+                    "Если есть шаги, пиши по порядку. В конце укажи: ИСПОЛЬЗОВАННЫЕ_МЕТКИ: ID_1, ID_2...\n\n"
+                    f"КОНТЕКСТ ДОКУМЕНТАЦИИ:\n{context}\n\n"
+                    f"ВОПРОС: {prompt}"
                 )
+                
+                # Чистая генерация без системных полей
                 response = client.models.generate_content(
                     model=STABLE_MODEL_ID,
-                    contents=f"КОНТЕКСТ:\n{context}\n\nВОПРОС: {prompt}",
-                    config=config
+                    contents=full_prompt,
+                    config=types.GenerateContentConfig(temperature=0.1)
                 )
+                
                 res = response.text
                 clean = re.sub(r'ИСПОЛЬЗОВАННЫЕ_МЕТКИ:.*', '', res).strip()
                 ids = re.findall(r'ID_\d+', res)
