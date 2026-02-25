@@ -10,7 +10,6 @@ import streamlit.components.v1 as components
 # --- 1. НАСТРОЙКА СТРАНИЦЫ ---
 st.set_page_config(page_title="MP10 Verified Engineer", layout="wide")
 
-# Кнопка копирования
 def copy_to_clipboard(text, key):
     safe_text = json.dumps(text)
     js_code = f"""
@@ -25,16 +24,16 @@ def copy_to_clipboard(text, key):
     </script>"""
     components.html(js_code, height=45)
 
-# --- 2. ПАРАМЕТРЫ МОДЕЛИ ---
+# --- 2. ПАРАМЕТРЫ МОДЕЛИ (ПЕРЕХОД НА 1.5 FLASH) ---
 API_KEY = st.secrets.get("GOOGLE_API_KEY")
-# Выбираем стабильную 2.0 из вашего списка, чтобы обойти лимиты 2.5
-SELECTED_MODEL = "models/gemini-2.0-flash" 
+# Используем 1.5 Flash - у нее самые высокие лимиты в Free Tier
+SELECTED_MODEL = "models/gemini-1.5-flash" 
 
 def call_gemini(prompt):
     url = f"https://generativelanguage.googleapis.com/v1beta/{SELECTED_MODEL}:generateContent?key={API_KEY}"
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 2048}
+        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 2048}
     }
     try:
         res = requests.post(url, json=payload, timeout=20)
@@ -48,8 +47,7 @@ def call_gemini(prompt):
 @st.cache_resource
 def load_docs():
     docs_path = "./docs"
-    if not os.path.exists(docs_path):
-        return []
+    if not os.path.exists(docs_path): return []
     all_chunks = []
     files = [f for f in os.listdir(docs_path) if f.endswith(".pdf")]
     for f in files:
@@ -58,15 +56,14 @@ def load_docs():
             pages = loader.load()
             splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
             all_chunks.extend(splitter.split_documents(pages))
-        except:
-            continue
+        except: continue
     return all_chunks
 
 def get_context(query, chunks):
     if not chunks: return [], ""
     q = query.lower()
     scored = []
-    # Учет ваших приоритетов: adminguide, operatorguide, implementguide
+    # Поиск по вашим приоритетам: adminguide, operatorguide, implementguide
     priority_keys = ['adminguide', 'operatorguide', 'implementguide']
     
     for c in chunks:
@@ -74,14 +71,11 @@ def get_context(query, chunks):
         fn = os.path.basename(c.metadata.get('source', '')).lower()
         score = sum(10 for word in q.split() if len(word) > 3 and word in txt)
         
-        # Повышаем вес приоритетных файлов
         if any(key in fn for key in priority_keys):
             score *= 3.0
         else:
             score *= 0.5
-            
-        if score > 0:
-            scored.append((score, c))
+        if score > 0: scored.append((score, c))
             
     scored.sort(key=lambda x: x[0], reverse=True)
     top = scored[:6]
@@ -96,63 +90,52 @@ def get_context(query, chunks):
     return raw, ctx_text
 
 # --- 4. ИНТЕРФЕЙС И ЧАТ ---
-st.title("🏗️ MaxPatrol 10: Verified Engineer")
+st.title("🏗️ MP10: Verified Engineer")
 
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-if "chunks" not in st.session_state:
-    st.session_state.chunks = None
+if "messages" not in st.session_state: st.session_state.messages = []
+if "chunks" not in st.session_state: st.session_state.chunks = None
 
 with st.sidebar:
     st.header("Управление")
     if st.button("🔄 Проиндексировать PDF"):
-        with st.spinner("Анализирую документы..."):
+        with st.spinner("Анализ документов..."):
             st.session_state.chunks = load_docs()
-            st.success(f"Готово! Загружено фрагментов: {len(st.session_state.chunks)}")
-    
+            st.success(f"Готово! Чанков: {len(st.session_state.chunks)}")
     if st.button("🗑️ Очистить чат"):
         st.session_state.messages = []
         st.rerun()
-    
     st.divider()
-    st.info(f"Используется модель:\n`{SELECTED_MODEL}`")
+    st.success(f"Движок: `Gemini 1.5 Flash` (Высокий лимит)")
 
-# Отображение истории
+# Чат
 for m in st.session_state.messages:
-    with st.chat_message(m["role"]):
-        st.markdown(m["content"])
+    with st.chat_message(m["role"]): st.markdown(m["content"])
 
-# Поле ввода (всегда доступно)
 if prompt := st.chat_input("Задайте вопрос по MaxPatrol 10..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
+    with st.chat_message("user"): st.markdown(prompt)
 
     if not st.session_state.chunks:
-        with st.chat_message("assistant"):
-            st.warning("Пожалуйста, нажмите 'Проиндексировать PDF' в боковом меню перед началом работы.")
+        with st.chat_message("assistant"): st.warning("Сначала проиндексируйте PDF в боковом меню.")
     else:
         with st.chat_message("assistant"):
             sources, context = get_context(prompt, st.session_state.chunks)
-            
             full_prompt = (
-                "Ты эксперт по MaxPatrol 10. Отвечай только на основе предоставленного контекста. "
-                "Если в контексте нет ответа, так и скажи. Если есть шаги настройки, перечисли их. "
-                "В конце обязательно напиши: ИСПОЛЬЗОВАННЫЕ_МЕТКИ: ID_1, ID_2...\n\n"
+                "Ты эксперт по MaxPatrol 10. Отвечай только по контексту. "
+                "В конце напиши: ИСПОЛЬЗОВАННЫЕ_МЕТКИ: ID_1, ID_2...\n\n"
                 f"КОНТЕКСТ:\n{context}\n\nВОПРОС: {prompt}"
             )
-            
-            with st.spinner("Поиск в документации..."):
+            with st.spinner("Думаю..."):
                 response = call_gemini(full_prompt)
             
-            # Обработка меток и источников
-            clean_ans = re.sub(r'ИСПОЛЬЗОВАННЫЕ_МЕТКИ:.*', '', response).strip()
-            used_ids = re.findall(r'ID_\d+', response)
-            verified = [s for s in sources if s['label'] in used_ids] or sources[:1]
-            
-            source_links = "\n\n**Источники:**\n" + "\n".join([f"- {s['file']}, стр. {s['page']}" for s in verified])
-            final_text = clean_ans + source_links
-            
-            st.markdown(final_text)
-            copy_to_clipboard(final_text, f"ans_{len(st.session_state.messages)}")
-            st.session_state.messages.append({"role": "assistant", "content": final_text})
+            if "Ошибка API 429" in response:
+                st.error("Лимит исчерпан. Подождите 60 секунд.")
+            else:
+                clean_ans = re.sub(r'ИСПОЛЬЗОВАННЫЕ_МЕТКИ:.*', '', response).strip()
+                used_ids = re.findall(r'ID_\d+', response)
+                verified = [s for s in sources if s['label'] in used_ids] or sources[:1]
+                source_links = "\n\n**Источники:**\n" + "\n".join([f"- {s['file']}, стр. {s['page']}" for s in verified])
+                final_text = clean_ans + source_links
+                st.markdown(final_text)
+                copy_to_clipboard(final_text, f"ans_{len(st.session_state.messages)}")
+                st.session_state.messages.append({"role": "assistant", "content": final_text})
