@@ -10,6 +10,9 @@ import streamlit.components.v1 as components
 # --- 1. НАСТРОЙКА СТРАНИЦЫ ---
 st.set_page_config(page_title="Engineer Verified Pro", layout="wide")
 
+# CSS для скрытия статуса загрузки, если нужно
+st.markdown("""<style> .stDeployButton {display:none;} </style>""", unsafe_allow_html=True)
+
 def copy_to_clipboard(text, key):
     safe_text = json.dumps(text)
     js_code = f"""
@@ -25,182 +28,144 @@ def copy_to_clipboard(text, key):
     """
     components.html(js_code, height=45)
 
-# --- 2. ЖЕСТКАЯ ФИЛЬТРАЦИЯ МОДЕЛИ ---
+# --- 2. КОНФИГУРАЦИЯ API (ФИКСИРОВАННАЯ) ---
 api_key = st.secrets.get("GOOGLE_API_KEY")
+if not api_key:
+    st.error("Критическая ошибка: GOOGLE_API_KEY не найден в Secrets!")
+    st.stop()
+
 genai.configure(api_key=api_key)
 
-# Очищаем кэш ресурсов, чтобы принудительно применить новый выбор модели
-st.cache_resource.clear()
+# Используем максимально простую и стабильную версию
+WORKING_MODEL_NAME = "gemini-1.5-flash"
+model = genai.GenerativeModel(model_name=WORKING_MODEL_NAME)
 
-@st.cache_resource
-def force_stable_model():
-    """
-    Функция принудительного поиска модели 1.5-flash.
-    Игнорирует любые упоминания 2.0, 2.5 или experimental.
-    """
-    try:
-        all_models = genai.list_models()
-        # Ищем строго 1.5-flash, игнорируя новинки с лимитом 20 запросов
-        for m in all_models:
-            name = m.name.lower()
-            if "1.5-flash" in name and "2.0" not in name and "2.5" not in name and "experimental" not in name:
-                # Проверяем поддержку генерации
-                if 'generateContent' in m.supported_generation_methods:
-                    return m.name
-        
-        # Если поиск по списку не дал результатов, возвращаем стандартное имя
-        return "models/gemini-1.5-flash"
-    except:
-        return "models/gemini-1.5-flash"
-
-WORKING_MODEL_NAME = force_stable_model()
-st.sidebar.warning(f"⚠️ Активный движок: {WORKING_MODEL_NAME}")
-
-model = genai.GenerativeModel(
-    model_name=WORKING_MODEL_NAME,
-    generation_config={"temperature": 0.1}
-)
-
-# --- 3. ОБРАБОТКА PDF С ВЕСАМИ (ВАША ИНСТРУКЦИЯ) ---
-@st.cache_resource
+# --- 3. ОПТИМИЗИРОВАННАЯ ОБРАБОТКА PDF ---
 def load_docs_engine():
     docs_path = "./docs"
-    if not os.path.exists(docs_path) or not os.listdir(docs_path):
-        return None
-    all_chunks = []
+    if not os.path.exists(docs_path):
+        st.error(f"Папка {docs_path} не найдена!")
+        return []
+    
     files = [f for f in os.listdir(docs_path) if f.endswith(".pdf")]
-    for f in files:
+    if not files:
+        st.warning("В папке /docs нет PDF файлов.")
+        return []
+    
+    all_chunks = []
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    for i, f in enumerate(files):
+        status_text.text(f"Обработка: {f}...")
         try:
             loader = PyPDFLoader(os.path.join(docs_path, f))
+            # Загружаем страницы по одной, чтобы не забивать память
             pages = loader.load()
-            splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+            splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
             all_chunks.extend(splitter.split_documents(pages))
         except Exception as e:
-            st.error(f"Ошибка в файле {f}: {e}")
+            st.error(f"Ошибка в файле {f}: {str(e)}")
+        progress_bar.progress((i + 1) / len(files))
+    
+    status_text.text("✅ Загрузка завершена!")
     return all_chunks
 
-chunks = load_docs_engine()
-
-def get_context(query, chunks):
-    if not chunks: return [], ""
-    query_low = query.lower()
-    query_words = [w for w in query_low.split() if len(w) > 3]
-    scored = []
-    
-    # ПРИОРИТЕТЫ: adminguide, operatorguide, implementguide
-    priority_keywords = ['adminguide', 'operatorguide', 'implementguide']
-    
-    for c in chunks:
-        content_low = c.page_content.lower()
-        filename_low = os.path.basename(c.metadata.get('source', '')).lower()
-        score = 0
-        
-        # Базовый скоринг текста
-        if query_low in content_low:
-            score += 100 
-        for w in query_words:
-            if w in content_low:
-                score += 10
-        
-        # Взвешивание файлов
-        is_priority = any(k in filename_low for k in priority_keywords)
-        if is_priority:
-            score *= 3.0 # Утроенный вес для гайдов
-        else:
-            score *= 0.6 # Пониженный вес для справочников
-        
-        if score > 0:
-            scored.append((score, c))
-    
-    scored.sort(key=lambda x: x[0], reverse=True)
-    top_chunks = scored[:8]
-    
-    raw_data = []
-    context_text = ""
-    for i, (_, c) in enumerate(top_chunks):
-        filename = os.path.basename(c.metadata.get('source', 'unknown'))
-        page_num = c.metadata.get('page', 0) + 1
-        label = f"ID_{i+1}"
-        
-        lines = [l.strip() for l in c.page_content.split('\n') if len(l.strip()) > 5]
-        section = lines[0] if lines else "Раздел документации"
-        
-        raw_data.append({
-            "label": label, "content": c.page_content, 
-            "file": filename, "page": page_num, "section": section
-        })
-        context_text += f"\n--- ИСТОЧНИК {label} ---\n{c.page_content}\n"
-    return raw_data, context_text
-
-# --- 4. ИНТЕРФЕЙС ---
-st.title("🏗️ MaxPatrol 10: Verified Engineer")
-
-if st.sidebar.button("Очистить историю и кэш"):
-    st.cache_resource.clear()
-    st.session_state.messages = []
-    st.rerun()
+# --- 4. УПРАВЛЕНИЕ СОСТОЯНИЕМ ---
+if "chunks" not in st.session_state:
+    st.session_state.chunks = None
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
+# --- 5. ИНТЕРФЕЙС ---
+st.title("🏗️ MaxPatrol 10: Verified Engineer")
+
+with st.sidebar:
+    st.header("Управление данными")
+    if st.button("🔄 Загрузить/Обновить базу документов"):
+        with st.spinner("Индексация документов... это может занять минуту"):
+            st.session_state.chunks = load_docs_engine()
+            st.success(f"Загружено фрагментов: {len(st.session_state.chunks) if st.session_state.chunks else 0}")
+    
+    if st.button("🗑️ Очистить чат"):
+        st.session_state.messages = []
+        st.rerun()
+
+    st.divider()
+    st.info(f"Движок: `{WORKING_MODEL_NAME}`")
+
+# Логика поиска (вынесена отдельно)
+def get_context(query, chunks):
+    if not chunks: return [], ""
+    query_low = query.lower()
+    scored = []
+    priority_keywords = ['adminguide', 'operatorguide', 'implementguide']
+    
+    for c in chunks:
+        content_low = c.page_content.lower()
+        filename = os.path.basename(c.metadata.get('source', '')).lower()
+        score = sum(10 for w in query_low.split() if len(w) > 3 and w in content_low)
+        
+        # Приоритезация по вашему правилу
+        if any(k in filename for k in priority_keywords):
+            score *= 3.0
+        else:
+            score *= 0.5
+            
+        if score > 0:
+            scored.append((score, c))
+    
+    scored.sort(key=lambda x: x[0], reverse=True)
+    top = scored[:6]
+    
+    raw_data = []
+    context_text = ""
+    for i, (_, c) in enumerate(top):
+        label = f"ID_{i+1}"
+        file = os.path.basename(c.metadata.get('source', ''))
+        page = c.metadata.get('page', 0) + 1
+        raw_data.append({"label": label, "content": c.page_content, "file": file, "page": page})
+        context_text += f"\n[{label}]\n{c.page_content}\n"
+    return raw_data, context_text
+
+# Отображение чата
 for i, m in enumerate(st.session_state.messages):
     with st.chat_message(m["role"]):
         st.markdown(m["content"])
-        if m["role"] == "assistant" and "verified_sources" in m:
-            copy_to_clipboard(m["content"], f"h_{i}")
-            if m["verified_sources"]:
-                with st.expander("✅ Подтверждающие выдержки"):
-                    for src in m["verified_sources"]:
-                        st.info(f"**{src['file']}, стр. {src['page']}**\n\n{src['content']}")
+        if m["role"] == "assistant" and m.get("sources"):
+            with st.expander("📚 Источники"):
+                for s in m["sources"]:
+                    st.caption(f"**{s['file']}, стр. {s['page']}**")
 
-if prompt := st.chat_input("Ваш технический вопрос..."):
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
+# Ввод запроса
+if prompt := st.chat_input("Спросите что-нибудь по MaxPatrol 10..."):
+    if not st.session_state.chunks:
+        st.error("Сначала загрузите базу документов в боковой панели!")
+    else:
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
 
-    with st.chat_message("assistant"):
-        raw_candidates, context_for_ai = get_context(prompt, chunks)
-        
-        with st.spinner("Анализ документации..."):
-            system_instruction = (
-                "Ты техподдержка MaxPatrol 10. Отвечай только по контексту. "
-                "Если есть шаги настройки — выпиши их. В конце укажи: "
-                "ИСПОЛЬЗОВАННЫЕ_МЕТКИ: ID_1, ID_2"
-            )
+        with st.chat_message("assistant"):
+            sources, context = get_context(prompt, st.session_state.chunks)
+            
+            sys_instr = "Ты инженер MP10. Отвечай кратко по контексту. В конце напиши ИСПОЛЬЗОВАННЫЕ_МЕТКИ: ID_1..."
             
             try:
-                response = model.generate_content(f"{system_instruction}\n\nКОНТЕКСТ:\n{context_for_ai}\n\nВОПРОС:\n{prompt}")
+                response = model.generate_content(f"{sys_instr}\n\nКонтекст:\n{context}\n\nВопрос: {prompt}")
+                text = response.text
                 
-                if response.text:
-                    raw_answer = response.text
-                    used_labels = re.findall(r'ID_\d+', raw_answer)
-                    verified_sources = [s for s in raw_candidates if s['label'] in used_labels]
-                    
-                    if not verified_sources and raw_candidates:
-                        verified_sources = [raw_candidates[0]]
-
-                    clean_answer = re.sub(r'ИСПОЛЬЗОВАННЫЕ_МЕТКИ:.*', '', raw_answer).strip()
-                    
-                    # Форматирование ссылок
-                    links_block = "\n\n### Ссылки на документацию\n"
-                    for src in verified_sources:
-                        doc_title = src['file'].replace('_', ' ').replace('.pdf', '').title()
-                        links_block += f"- {doc_title}, {src['section']}, стр. {src['page']}, {src['file']}\n"
-                    
-                    final_answer = clean_answer + links_block
-                else:
-                    final_answer = "Ошибка генерации. Проверьте контекст."
-                    verified_sources = []
+                # Чистим метки и собираем ссылки
+                clean_text = re.sub(r'ИСПОЛЬЗОВАННЫЕ_МЕТКИ:.*', '', text).strip()
+                used_ids = re.findall(r'ID_\d+', text)
+                verified = [s for s in sources if s['label'] in used_ids] or sources[:1]
+                
+                links = "\n\n**Ссылки:**\n" + "\n".join([f"- {s['file'].replace('_',' ').title()}, стр. {s['page']}, {s['file']}" for s in verified])
+                full_response = clean_text + links
+                
+                st.markdown(full_response)
+                copy_to_clipboard(full_response, "current")
+                st.session_state.messages.append({"role": "assistant", "content": full_response, "sources": verified})
             except Exception as e:
-                final_answer = f"❌ Ошибка API: {str(e)}"
-                verified_sources = []
-
-        st.markdown(final_answer)
-        copy_to_clipboard(final_answer, "new")
-        
-        if verified_sources:
-            with st.expander("✅ Подтверждающие выдержки"):
-                for src in verified_sources:
-                    st.info(f"**{src['file']}, стр. {src['page']}**\n\n{src['content']}")
-        
-        st.session_state.messages.append({"role": "assistant", "content": final_answer, "verified_sources": verified_sources})
+                st.error(f"Ошибка API: {e}")
