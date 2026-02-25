@@ -25,43 +25,20 @@ def copy_to_clipboard(text, key):
     """
     components.html(js_code, height=45)
 
-# --- 2. УМНАЯ КОНФИГУРАЦИЯ МОДЕЛИ (ОБХОД 404 И 429) ---
+# --- 2. КОНФИГУРАЦИЯ API (ЖЕСТКАЯ ФИКСАЦИЯ) ---
 api_key = st.secrets.get("GOOGLE_API_KEY")
 genai.configure(api_key=api_key)
 
-@st.cache_resource
-def get_stable_model():
-    try:
-        # Ищем все модели, поддерживающие генерацию контента
-        available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        
-        # 1. Сначала ищем 1.5 Flash (у неё лимит 1500 запросов/день, а не 20)
-        for name in available_models:
-            if "gemini-1.5-flash" in name and "latest" in name:
-                return name
-        for name in available_models:
-            if "gemini-1.5-flash" in name:
-                return name
-        
-        # 2. Если 1.5 Flash нет, берем любую доступную 1.5 Pro
-        for name in available_models:
-            if "gemini-1.5-pro" in name:
-                return name
-        
-        # 3. Крайний случай - берем первую из списка
-        return available_models[0]
-    except Exception:
-        return "models/gemini-1.5-flash"
-
-WORKING_MODEL_NAME = get_stable_model()
-st.sidebar.info(f"🚀 Активная модель: `{WORKING_MODEL_NAME}`")
+# ЖЕСТКО ФИКСИРУЕМ МОДЕЛЬ ДЛЯ ОБХОДА ОШИБКИ 429 (GEMINI 2.5) И 404
+WORKING_MODEL_NAME = "models/gemini-1.5-flash"
+st.sidebar.success(f"🤖 Стабильный движок: `1.5-flash`")
 
 model = genai.GenerativeModel(
     model_name=WORKING_MODEL_NAME,
-    generation_config={"temperature": 0.2}
+    generation_config={"temperature": 0.1}
 )
 
-# --- 3. ОБРАБОТКА PDF С ВЕСАМИ ---
+# --- 3. ОБРАБОТКА PDF С ПРИОРИТЕТАМИ ---
 @st.cache_resource
 def load_docs_engine():
     docs_path = "./docs"
@@ -73,8 +50,8 @@ def load_docs_engine():
         try:
             loader = PyPDFLoader(os.path.join(docs_path, f))
             pages = loader.load()
-            # Оптимальный размер чанка для инженерной документации
-            splitter = RecursiveCharacterTextSplitter(chunk_size=1200, chunk_overlap=250)
+            # Чанки по 1000 знаков для лучшей точности
+            splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
             all_chunks.extend(splitter.split_documents(pages))
         except Exception as e:
             st.error(f"Ошибка в файле {f}: {e}")
@@ -88,7 +65,7 @@ def get_context(query, chunks):
     query_words = [w for w in query_low.split() if len(w) > 3]
     scored = []
     
-    # Ваши приоритетные источники
+    # ПРИОРИТЕТЫ ИЗ ВАШЕЙ ИНСТРУКЦИИ
     priority_keywords = ['adminguide', 'operatorguide', 'implementguide']
     
     for c in chunks:
@@ -96,25 +73,24 @@ def get_context(query, chunks):
         filename_low = os.path.basename(c.metadata.get('source', '')).lower()
         score = 0
         
-        # Базовый скоринг
         if query_low in content_low:
             score += 100 
         for w in query_words:
             if w in content_low:
                 score += 10
         
-        # ПРИМЕНЕНИЕ ВЕСОВ (Удвоенный приоритет для гайдов)
+        # Взвешивание источников
         is_priority = any(k in filename_low for k in priority_keywords)
         if is_priority:
-            score *= 2.5
+            score *= 3.0  # Утроенный вес для руководств админа/оператора
         else:
-            score *= 0.7
+            score *= 0.6  # Сниженный вес для справочников
         
         if score > 0:
             scored.append((score, c))
     
     scored.sort(key=lambda x: x[0], reverse=True)
-    top_chunks = scored[:7]
+    top_chunks = scored[:8] # Увеличили до 8 кусков для полноты ответа
     
     raw_data = []
     context_text = ""
@@ -123,9 +99,9 @@ def get_context(query, chunks):
         page_num = c.metadata.get('page', 0) + 1
         label = f"ID_{i+1}"
         
-        # Попытка вытащить заголовок раздела
-        lines = [l.strip() for l in c.page_content.split('\n') if len(l.strip()) > 3]
-        section = lines[0] if lines else "Техническое описание"
+        # Берем заголовок из первой строки текста
+        lines = [l.strip() for l in c.page_content.split('\n') if len(l.strip()) > 5]
+        section = lines[0] if lines else "Технический раздел"
         
         raw_data.append({
             "label": label, 
@@ -157,7 +133,7 @@ for i, m in enumerate(st.session_state.messages):
                     for src in m["verified_sources"]:
                         st.info(f"**{src['file']}, стр. {src['page']}**\n\n{src['content']}")
 
-if prompt := st.chat_input("Напишите технический вопрос..."):
+if prompt := st.chat_input("Запрос к документации MaxPatrol 10..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
@@ -165,12 +141,12 @@ if prompt := st.chat_input("Напишите технический вопрос
     with st.chat_message("assistant"):
         raw_candidates, context_for_ai = get_context(prompt, chunks)
         
-        with st.spinner("Анализирую документацию..."):
+        with st.spinner("Поиск инструкций..."):
             system_instruction = (
-                "Ты технический эксперт. Твоя цель — найти в контексте ответ на вопрос. "
-                "Если в тексте есть пошаговый алгоритм, опиши его детально. "
-                "В конце ответа ОБЯЗАТЕЛЬНО укажи ID источников через запятую: "
-                "ИСПОЛЬЗОВАННЫЕ_МЕТКИ: ID_1, ID_2"
+                "Ты — эксперт техподдержки MaxPatrol 10. Твоя задача — найти ПРЯМУЮ инструкцию в тексте. "
+                "Если в предоставленных фрагментах есть описание действий, шаги или параметры — перечисли их. "
+                "Если информации недостаточно, так и скажи, но попытайся найти максимально близкие данные. "
+                "В самом конце напиши только: ИСПОЛЬЗОВАННЫЕ_МЕТКИ: ID_1, ID_2 и т.д."
             )
             
             try:
@@ -181,26 +157,27 @@ if prompt := st.chat_input("Напишите технический вопрос
                     used_labels = re.findall(r'ID_\d+', raw_answer)
                     verified_sources = [s for s in raw_candidates if s['label'] in used_labels]
                     
+                    # Пруфы всегда должны быть, даже если ИИ забыл метки
                     if not verified_sources and raw_candidates:
                         verified_sources = [raw_candidates[0]]
 
                     clean_answer = re.sub(r'ИСПОЛЬЗОВАННЫЕ_МЕТКИ:.*', '', raw_answer).strip()
                     
-                    # Программная сборка ссылок
+                    # Сборка ссылок (программная)
                     links_block = "\n\n### Ссылки на документацию\n"
                     if verified_sources:
                         for src in verified_sources:
                             doc_title = src['file'].replace('_', ' ').replace('.pdf', '').title()
                             links_block += f"- {doc_title}, {src['section']}, стр. {src['page']}, {src['file']}\n"
                     else:
-                        links_block = "\n\n*Информации в документации не найдено.*"
+                        links_block = "\n\n*Документация по данному вопросу не найдена.*"
                     
                     final_answer = clean_answer + links_block
                 else:
-                    final_answer = "К сожалению, модель не смогла сгенерировать текст."
+                    final_answer = "Ошибка обработки данных."
                     verified_sources = []
             except Exception as e:
-                final_answer = f"❌ Ошибка: {str(e)}"
+                final_answer = f"❌ Ошибка (проверьте API-ключ или подождите 1 минуту): {str(e)}"
                 verified_sources = []
 
         st.markdown(final_answer)
