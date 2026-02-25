@@ -1,14 +1,14 @@
 import streamlit as st
 import os
+import requests
 import json
 import re
-import requests
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 import streamlit.components.v1 as components
 
-# --- 1. НАСТРОЙКА СТРАНИЦЫ ---
-st.set_page_config(page_title="MP10 Verified Engineer", layout="wide")
+# --- 1. НАСТРОЙКА ---
+st.set_page_config(page_title="Engineer Verified Pro (Groq)", layout="wide")
 
 def copy_to_clipboard(text, key):
     safe_text = json.dumps(text)
@@ -21,136 +21,155 @@ def copy_to_clipboard(text, key):
             setTimeout(() => {{ this.innerText = '📋 Копировать ответ'; }}, 2000);
         }});
     }}
-    </script>"""
+    </script>
+    """
     components.html(js_code, height=45)
 
-# --- 2. ПАРАМЕТРЫ МОДЕЛИ (ПЕРЕКЛЮЧЕНИЕ НА LITE) ---
-API_KEY = st.secrets.get("GOOGLE_API_KEY")
+# --- 2. КОНФИГУРАЦИЯ GROQ API ---
+GROQ_API_KEY = st.secrets.get("GROQ_API_KEY")
+MODEL_ID = "llama-3.3-70b-versatile"  # Самая мощная модель в Groq
+API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
-# 2.0-flash-lite - самая экономная модель из вашего списка, 
-# вероятность получить на ней 429 минимальна.
-SELECTED_MODEL_ID = "gemini-2.0-flash-lite-001" 
-
-def call_gemini(prompt):
-    # Используем v1beta, так как список моделей был оттуда
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{SELECTED_MODEL_ID}:generateContent?key={API_KEY}"
-    
-    headers = {'Content-Type': 'application/json'}
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "temperature": 0.1,
-            "maxOutputTokens": 2048
-        }
-    }
-    
-    try:
-        # Увеличиваем таймаут, Lite модели иногда "прогреваются"
-        res = requests.post(url, headers=headers, json=payload, timeout=90)
-        
-        if res.status_code == 200:
-            return res.json()['candidates'][0]['content']['parts'][0]['text']
-        else:
-            return f"Ошибка API {res.status_code}: {res.text}"
-            
-    except requests.exceptions.Timeout:
-        return "Превышено время ожидания. Попробуйте еще раз через 10 секунд."
-    except Exception as e:
-        return f"Ошибка соединения: {str(e)}"
-
-# --- 3. ОБРАБОТКА ДОКУМЕНТОВ ---
+# --- 3. ОБРАБОТКА PDF ---
 @st.cache_resource
-def load_docs():
+def load_docs_engine():
     docs_path = "./docs"
-    if not os.path.exists(docs_path): return []
+    if not os.path.exists(docs_path) or not os.listdir(docs_path):
+        return None
     all_chunks = []
     files = [f for f in os.listdir(docs_path) if f.endswith(".pdf")]
     for f in files:
         try:
             loader = PyPDFLoader(os.path.join(docs_path, f))
             pages = loader.load()
-            splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
+            # Увеличенный размер чанка для лучшего контекста в Llama
+            splitter = RecursiveCharacterTextSplitter(chunk_size=1500, chunk_overlap=200)
             all_chunks.extend(splitter.split_documents(pages))
-        except: continue
+        except Exception as e:
+            st.error(f"Ошибка в {f}: {e}")
     return all_chunks
+
+chunks = load_docs_engine()
 
 def get_context(query, chunks):
     if not chunks: return [], ""
-    q = query.lower()
+    query_words = query.lower().split()
     scored = []
-    # Поиск по вашим приоритетам: adminguide, operatorguide, implementguide
-    priority_keys = ['adminguide', 'operatorguide', 'implementguide']
+    
+    # Приоритеты из ваших инструкций
+    priority_keywords = ['adminguide', 'operatorguide', 'implementguide']
     
     for c in chunks:
-        txt = c.page_content.lower()
-        fn = os.path.basename(c.metadata.get('source', '')).lower()
-        score = sum(10 for word in q.split() if len(word) > 3 and word in txt)
+        content_low = c.page_content.lower()
+        filename = os.path.basename(c.metadata.get('source', '')).lower()
         
-        if any(key in fn for key in priority_keys):
-            score *= 3.0
-        else:
-            score *= 0.5
-        if score > 0: scored.append((score, c))
+        # Базовый скоринг по словам
+        score = sum(2 for w in query_words if len(w) > 3 and w in content_low)
+        
+        # Повышаем приоритет согласно вашим правилам
+        if any(pk in filename for pk in priority_keywords):
+            score *= 2.5
+            
+        if score > 0:
+            scored.append((score, c))
             
     scored.sort(key=lambda x: x[0], reverse=True)
-    top = scored[:4]
+    top_chunks = scored[:6] # Llama любит качественный, а не избыточный контекст
     
-    raw = []; ctx_text = ""
-    for i, (_, c) in enumerate(top):
-        label = f"ID_{i+1}"
-        fname = os.path.basename(c.metadata.get('source', ''))
-        page = c.metadata.get('page', 0) + 1
-        raw.append({"label": label, "file": fname, "page": page})
-        ctx_text += f"\n[{label}] (Файл: {fname}, Стр: {page})\n{c.page_content}\n"
-    return raw, ctx_text
+    raw_data = []
+    context_text = ""
+    for _, c in top_chunks:
+        filename = os.path.basename(c.metadata.get('source', 'unknown'))
+        page_num = c.metadata.get('page', 0) + 1
+        label = f"SOURCE_{filename}_PAGE_{page_num}".replace(" ", "_").replace(".", "_")
+        raw_data.append({"label": label, "content": c.page_content, "file": filename, "page": page_num})
+        context_text += f"\n--- ИСТОЧНИК_МЕТКА: {label} ---\n{c.page_content}\n"
+    return raw_data, context_text
 
-# --- 4. ИНТЕРФЕЙС И ЧАТ ---
-st.title("🏗️ MP10: Verified Engineer")
+# --- 4. ИНТЕРФЕЙС ---
+st.title("🏗️ MaxPatrol 10: Verified Engineer (Groq Speed)")
 
-if "messages" not in st.session_state: st.session_state.messages = []
-if "chunks" not in st.session_state: st.session_state.chunks = None
+if st.sidebar.button("Очистить историю чата"):
+    st.session_state.messages = []
+    st.rerun()
 
-with st.sidebar:
-    st.header("Управление")
-    if st.button("🔄 Проиндексировать PDF"):
-        with st.spinner("Анализ документов..."):
-            st.session_state.chunks = load_docs()
-            st.success(f"Готово! Чанков: {len(st.session_state.chunks)}")
-    if st.button("🗑️ Очистить чат"):
-        st.session_state.messages = []
-        st.rerun()
-    st.divider()
-    st.success(f"Движок: `Gemini 1.5 Flash` (Высокий лимит)")
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
-# Чат
-for m in st.session_state.messages:
-    with st.chat_message(m["role"]): st.markdown(m["content"])
+# Отрисовка истории
+for i, m in enumerate(st.session_state.messages):
+    with st.chat_message(m["role"]):
+        st.markdown(m["content"])
+        if m["role"] == "assistant":
+            copy_to_clipboard(m["content"], f"msg_{i}")
+            verified = m.get("verified_sources", [])
+            if verified:
+                with st.expander(f"✅ Подтверждающие выдержки"):
+                    for src in verified:
+                        st.success(f"**Источник: {src.get('file')}, стр. {src.get('page')}**")
+                        st.text(src.get('content'))
 
-if prompt := st.chat_input("Задайте вопрос по MaxPatrol 10..."):
+if prompt := st.chat_input("Запросить данные по MP10..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"): st.markdown(prompt)
+    with st.chat_message("user"):
+        st.markdown(prompt)
 
-    if not st.session_state.chunks:
-        with st.chat_message("assistant"): st.warning("Сначала проиндексируйте PDF в боковом меню.")
-    else:
-        with st.chat_message("assistant"):
-            sources, context = get_context(prompt, st.session_state.chunks)
-            full_prompt = (
-                "Ты эксперт по MaxPatrol 10. Отвечай только по контексту. "
-                "В конце напиши: ИСПОЛЬЗОВАННЫЕ_МЕТКИ: ID_1, ID_2...\n\n"
-                f"КОНТЕКСТ:\n{context}\n\nВОПРОС: {prompt}"
-            )
-            with st.spinner("Думаю..."):
-                response = call_gemini(full_prompt)
+    with st.chat_message("assistant"):
+        raw_candidates, context_for_ai = get_context(prompt, chunks)
+        
+        with st.spinner("Llama 3 анализирует документацию..."):
+            system_instruction = """
+            Ты — промышленный ИИ-эксперт по системе MaxPatrol 10. Отвечай ТОЛЬКО по предоставленному контексту. 
+            Если ответа в тексте нет, вежливо сообщи об этом.
             
-            if "Ошибка API 429" in response:
-                st.error("Лимит исчерпан. Подождите 60 секунд.")
-            else:
-                clean_ans = re.sub(r'ИСПОЛЬЗОВАННЫЕ_МЕТКИ:.*', '', response).strip()
-                used_ids = re.findall(r'ID_\d+', response)
-                verified = [s for s in sources if s['label'] in used_ids] or sources[:1]
-                source_links = "\n\n**Источники:**\n" + "\n".join([f"- {s['file']}, стр. {s['page']}" for s in verified])
-                final_text = clean_ans + source_links
-                st.markdown(final_text)
-                copy_to_clipboard(final_text, f"ans_{len(st.session_state.messages)}")
-                st.session_state.messages.append({"role": "assistant", "content": final_text})
+            ФОРМАТ ССЫЛОК В КОНЦЕ:
+            1. Создай заголовок '### Ссылки на документацию'.
+            2. ПИШИ КАЖДУЮ ССЫЛКУ С НОВОЙ СТРОКИ ЧЕРЕЗ ДЕФИС.
+            3. Шаблон: - <Название документа>, <Раздел>, стр. <номер>, <имя PDF> (SOURCE_имя_PAGE_номер)
+            4. Между текстом ответа и ссылками — двойной отступ.
+            
+            ОБЯЗАТЕЛЬНО включай метку (SOURCE_...) для каждой ссылки, чтобы я мог верифицировать ответ.
+            """
+            
+            headers = {
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": "application/json"
+            }
+            
+            payload = {
+                "model": MODEL_ID,
+                "messages": [
+                    {"role": "system", "content": system_instruction},
+                    {"role": "user", "content": f"КОНТЕКСТ:\n{context_for_ai}\n\nВОПРОС:\n{prompt}"}
+                ],
+                "temperature": 0.1 # Для технической точности
+            }
+            
+            try:
+                response = requests.post(API_URL, headers=headers, json=payload, timeout=30)
+                result = response.json()
+                full_response = result['choices'][0]['message']['content']
+                
+                # Логика верификации источников
+                verified_sources = [s for s in raw_candidates if s['label'] in full_response]
+                # Убираем технические метки из финального текста для пользователя
+                clean_answer = re.sub(r'\(SOURCE_.*?_PAGE_.*?\)', '', full_response)
+                
+            except Exception as e:
+                clean_answer = f"❌ Ошибка Groq API: {str(e)}"
+                verified_sources = []
+
+        st.markdown(clean_answer)
+        copy_to_clipboard(clean_answer, "new_msg")
+        
+        if verified_sources:
+            with st.expander("✅ Подтверждающие выдержки"):
+                for src in verified_sources:
+                    st.success(f"**Файл: {src['file']}, Стр: {src['page']}**")
+                    st.text(src['content'])
+        
+        st.session_state.messages.append({
+            "role": "assistant", 
+            "content": clean_answer, 
+            "verified_sources": verified_sources
+        })
