@@ -110,7 +110,7 @@ for i, m in enumerate(st.session_state.messages):
             copy_to_clipboard(m["content"], f"msg_{i}")
             verified = m.get("verified_sources", [])
             if verified:
-                with st.expander(f"✅ Подтверждающие выдержки из документов"):
+                with st.expander(f"✅ Подтверждающие выдержки"):
                     for src in verified:
                         st.success(f"**Источник: {src.get('file')}, стр. {src.get('page')}**")
                         st.text(src.get('content'))
@@ -169,7 +169,7 @@ if prompt := st.chat_input("Задать вопрос по MaxPatrol SIEM..."):
         copy_to_clipboard(clean_answer, "new_msg")
         
         if verified_sources:
-            with st.expander("✅ Подтверждающие выдержки из документов"):
+            with st.expander("✅ Подтверждающие выдержки"):
                 for src in verified_sources:
                     st.success(f"**Файл: {src['file']}, Стр: {src['page']}**")
                     st.text(src['content'])
