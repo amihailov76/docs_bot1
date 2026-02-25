@@ -27,7 +27,7 @@ def copy_to_clipboard(text, key):
 # --- 2. ПАРАМЕТРЫ МОДЕЛИ (ПЕРЕХОД НА 1.5 FLASH) ---
 API_KEY = st.secrets.get("GOOGLE_API_KEY")
 # Используем 1.5 Flash - у нее самые высокие лимиты в Free Tier
-SELECTED_MODEL = models/gemini-flash-latest 
+SELECTED_MODEL = "models/gemini-flash-latest "
 
 def call_gemini(prompt):
     url = f"https://generativelanguage.googleapis.com/v1beta/{SELECTED_MODEL}:generateContent?key={API_KEY}"
