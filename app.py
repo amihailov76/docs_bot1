@@ -24,41 +24,35 @@ def copy_to_clipboard(text, key):
     </script>"""
     components.html(js_code, height=45)
 
-# --- 2. ПАРАМЕТРЫ МОДЕЛИ (ФИНАЛЬНЫЙ ФИКС ФОРМАТА) ---
+# --- 2. ПАРАМЕТРЫ МОДЕЛИ ---
 API_KEY = st.secrets.get("GOOGLE_API_KEY")
-# Берем имя из вашего списка. Если оно с "models/", убираем префикс для URL
-RAW_MODEL_NAME = "models/gemini-flash-latest"
-CLEAN_MODEL_NAME = RAW_MODEL_NAME.replace("models/", "")
+CLEAN_MODEL_NAME = "gemini-flash-latest"
 
 def call_gemini(prompt):
-    # Формируем URL. В v1beta/v1 адрес должен быть: /models/{name}:generateContent
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{CLEAN_MODEL_NAME}:generateContent?key={API_KEY}"
+    # Используем v1 для стабильности, если v1beta тормозит
+    url = f"https://generativelanguage.googleapis.com/v1/models/{CLEAN_MODEL_NAME}:generateContent?key={API_KEY}"
     
     headers = {'Content-Type': 'application/json'}
-    
-    # ВАЖНО: В payload НЕ ДОЛЖНО быть поля "model", 
-    # так как имя уже есть в URL. Только "contents".
     payload = {
-        "contents": [
-            {
-                "parts": [{"text": prompt}]
-            }
-        ],
-        "generationConfig": {
-            "temperature": 0.1,
-            "maxOutputTokens": 2048
-        }
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 2048}
     }
     
     try:
-        res = requests.post(url, headers=headers, json=payload, timeout=20)
+        # Увеличиваем timeout до 90 секунд
+        res = requests.post(url, headers=headers, json=payload, timeout=90)
         if res.status_code == 200:
             return res.json()['candidates'][0]['content']['parts'][0]['text']
         else:
             return f"Ошибка API {res.status_code}: {res.text}"
+    except requests.exceptions.Timeout:
+        return "Ошибка: Сервер Google слишком долго думал. Попробуйте упростить запрос или уменьшить базу."
     except Exception as e:
         return f"Ошибка соединения: {str(e)}"
 
+# --- КОРРЕКТИРОВКА В ФУНКЦИИ get_context ---
+# Найдите строку top = scored[:6] и замените на 4, чтобы уменьшить объем данных
+top = scored[:4]
 # --- 3. ОБРАБОТКА ДОКУМЕНТОВ ---
 @st.cache_resource
 def load_docs():
