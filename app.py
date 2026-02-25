@@ -85,12 +85,18 @@ def get_context(query, chunks):
         page_num = c.metadata.get('page', 0) + 1
         label = f"ID_{i+1}"
         
-        # Предварительно формируем строку ссылки, чтобы ИИ её просто скопировал
-        doc_title = filename.replace('.pdf', '').replace('_', ' ').title()
-        ref_link = f"{doc_title}, [УКАЖИ_РАЗДЕЛ], стр. {page_num}, {filename}"
+        # Пытаемся найти заголовок раздела (первая строка фрагмента или первая жирная строка)
+        content_lines = c.page_content.strip().split('\n')
+        section_name = content_lines[0][:100] if content_lines else "Раздел не определен"
         
-        raw_data.append({"label": label, "content": c.page_content, "file": filename, "page": page_num})
-        context_text += f"\n--- ИСТОЧНИК {label} ---\nССЫЛКА ДЛЯ КОПИРОВАНИЯ: {ref_link}\nТЕКСТ:\n{c.page_content}\n"
+        raw_data.append({
+            "label": label, 
+            "content": c.page_content, 
+            "file": filename, 
+            "page": page_num,
+            "section": section_name
+        })
+        context_text += f"\n=== ИСТОЧНИК {label} ===\n{c.page_content}\n"
     return raw_data, context_text
 
 # --- 4. ИНТЕРФЕЙС ---
@@ -124,31 +130,35 @@ if prompt := st.chat_input("Запросить технические данны
         
         with st.spinner("Анализ документации..."):
             system_instruction = (
-                "Ты инженерный эксперт. Отвечай только на основе контекста.\n"
-                "ТРЕБОВАНИЯ К ФОРМАТУ ССЫЛОК:\n"
-                "1. В конце ответа создай раздел '### Ссылки на документацию'.\n"
-                "2. Для каждого использованного источника скопируй строку 'ССЫЛКА ДЛЯ КОПИРОВАНИЯ' из контекста.\n"
-                "3. В скопированной строке замени '[УКАЖИ_РАЗДЕЛ]' на название раздела из текста.\n"
-                "4. В самый конец каждой строки ссылки добавь метку ID_X (без скобок).\n"
-                "5. ЗАПРЕЩЕНО: менять порядок слов в ссылке, использовать кавычки, ставить точки в конце ссылки."
+                "Ты инженерный эксперт. Отвечай только на основе контекста. "
+                "В самом конце ответа ОБЯЗАТЕЛЬНО перечисли метки использованных источников в формате: "
+                "ИСПОЛЬЗОВАННЫЕ_МЕТКИ: ID_1, ID_2. Больше ничего в конце писать не нужно."
             )
             
             try:
                 response = model.generate_content(f"{system_instruction}\n\nКОНТЕКСТ:\n{context_for_ai}\n\nВОПРОС:\n{prompt}")
                 
                 if response.text:
-                    full_text = response.text
+                    raw_answer = response.text
                     
-                    # Сбор пруфов для зеленого блока
-                    verified_sources = [s for s in raw_candidates if s['label'] in full_text]
+                    # 1. Находим метки, которые реально использовал ИИ
+                    used_labels = re.findall(r'ID_\d+', raw_answer)
+                    verified_sources = [s for s in raw_candidates if s['label'] in used_labels]
                     
-                    # Если ИИ не указал метки, берем топ-1 для надежности
-                    if not verified_sources and raw_candidates:
-                        verified_sources = [raw_candidates[0]]
+                    # Если ИИ забыл метки — берем топ-2 для безопасности
+                    if not verified_sources: verified_sources = raw_candidates[:2]
 
-                    # ОЧИСТКА: Удаляем технические метки ID_X и лишние артефакты
-                    clean_text = re.sub(r'\sID_\d+', '', full_text)
-                    final_answer = clean_text.strip()
+                    # 2. Очищаем основной текст от технических фраз
+                    clean_answer = re.sub(r'ИСПОЛЬЗОВАННЫЕ_МЕТКИ:.*', '', raw_answer).strip()
+                    
+                    # 3. ПРОГРАММНАЯ СБОРКА ССЫЛОК (ИИ сюда не лезет)
+                    links_block = "\n\n### Ссылки на документацию\n"
+                    for src in verified_sources:
+                        # Формируем название документа красиво из имени файла
+                        doc_name = src['file'].replace('_', ' ').replace('.pdf', '').title()
+                        links_block += f"- {doc_name}, {src['section']}, стр. {src['page']}, {src['file']}\n"
+                    
+                    final_answer = clean_answer + links_block
                 else:
                     final_answer = "⚠️ Ответ пуст."
                     verified_sources = []
