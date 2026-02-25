@@ -30,26 +30,65 @@ GROQ_API_KEY = st.secrets.get("GROQ_API_KEY")
 MODEL_ID = "llama-3.3-70b-versatile"  # Самая мощная модель в Groq
 API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
-# --- 3. ОБРАБОТКА PDF ---
+# --- 3. ВЫБОР ВЕРСИИ (ДОБАВЛЕНО) ---
+# Список доступных версий (папок в ./docs)
+available_versions = ["v27.6", "v26.0", "v25.1"]
+
+with st.sidebar:
+    st.header("Настройки")
+    selected_ver = st.selectbox(
+        "Версия MaxPatrol 10:",
+        available_versions,
+        index=0,
+        help="Выберите версию системы для поиска в соответствующей документации"
+    )
+
+    # Инициализация и сброс истории при смене версии
+    if "current_version" not in st.session_state:
+        st.session_state.current_version = selected_ver
+
+    if st.session_state.current_version != selected_ver:
+        st.session_state.messages = []
+        st.session_state.current_version = selected_ver
+        st.rerun()
+
+    if st.button("Очистить историю чата"):
+        st.session_state.messages = []
+        st.rerun()
+
+# --- 4. ОБРАБОТКА PDF (ОБНОВЛЕНО ДЛЯ ВЕРСИЙ) ---
 @st.cache_resource
-def load_docs_engine():
-    docs_path = "./docs"
+def load_docs_engine(version):
+    # Теперь путь строится динамически на основе выбранной версии
+    docs_path = os.path.join("./docs", version)
+    
     if not os.path.exists(docs_path) or not os.listdir(docs_path):
         return None
+    
     all_chunks = []
-    files = [f for f in os.listdir(docs_path) if f.endswith(".pdf")]
-    for f in files:
+    # Реализация ваших инструкций: сначала adminguide, operatorguide, implementguide
+    priority_keywords = ['adminguide', 'operatorguide', 'implementguide']
+    
+    all_files = [f for f in os.listdir(docs_path) if f.endswith(".pdf")]
+    
+    # Сортируем файлы так, чтобы приоритетные были в начале списка обработки
+    sorted_files = sorted(
+        all_files, 
+        key=lambda x: not any(pk in x.lower() for pk in priority_keywords)
+    )
+
+    for f in sorted_files:
         try:
             loader = PyPDFLoader(os.path.join(docs_path, f))
             pages = loader.load()
-            # Увеличенный размер чанка для лучшего контекста в Llama
             splitter = RecursiveCharacterTextSplitter(chunk_size=1500, chunk_overlap=200)
             all_chunks.extend(splitter.split_documents(pages))
         except Exception as e:
             st.error(f"Ошибка в {f}: {e}")
     return all_chunks
 
-chunks = load_docs_engine()
+# Загружаем чанки только для выбранной версии
+chunks = load_docs_engine(selected_ver)
 
 def get_context(query, chunks):
     if not chunks: return [], ""
@@ -86,9 +125,9 @@ def get_context(query, chunks):
         context_text += f"\n--- ИСТОЧНИК_МЕТКА: {label} ---\n{c.page_content}\n"
     return raw_data, context_text
 
-# --- 4. ИНТЕРФЕЙС ---
+# --- 5. ИНТЕРФЕЙС ---
 st.title("🏗️ MaxPatrol SIEM: Помощник пользователя")
-st.info("""Бот отвечает на вопросы по MaxPatrol SIEM 27.6, используя только официальную документацию. С пруфами.  
+st.info(f"""Бот отвечает на вопросы по MaxPatrol SIEM **{selected_ver}**, используя только официальную документацию. С пруфами.  
 \n⚠️ **Внимание!** Ответы генерируются ИИ Llama и могут содержать неточности, ошибки, неверные интерпретации документов. Всегда проверяйте важную информацию самостоятельно.  
 \nЧтобы не перегрузить бота запросами:  
 ⏳ Не задавайте более 3-х вопросов в минуту.
@@ -96,10 +135,6 @@ st.info("""Бот отвечает на вопросы по MaxPatrol SIEM 27.6,
 🎯 Старайтесь формулировать запрос конкретно (например, не "агенты", а "как установить агент в Linux").
 &nbsp;  
 🧹 После завершения работы очищайте историю чата.&nbsp;""")
-
-if st.sidebar.button("Очистить историю чата"):
-    st.session_state.messages = []
-    st.rerun()
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -117,7 +152,7 @@ for i, m in enumerate(st.session_state.messages):
                         st.success(f"**Источник: {src.get('file')}, стр. {src.get('page')}**")
                         st.text(src.get('content'))
 
-if prompt := st.chat_input("Задать вопрос по MaxPatrol SIEM..."):
+if prompt := st.chat_input(f"Задать вопрос по MaxPatrol SIEM {selected_ver}..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
