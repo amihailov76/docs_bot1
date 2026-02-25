@@ -25,103 +25,104 @@ def copy_to_clipboard(text, key):
     """
     components.html(js_code, height=45)
 
-# --- 2. УМНАЯ ИНИЦИАЛИЗАЦИЯ МОДЕЛИ (ФИКС 404 И 429) ---
+# --- 2. ЖЕСТКАЯ ДИАГНОСТИКА API ---
 api_key = st.secrets.get("GOOGLE_API_KEY")
-if not api_key:
-    st.error("Критическая ошибка: GOOGLE_API_KEY не найден!")
-    st.stop()
-
 genai.configure(api_key=api_key)
 
 @st.cache_resource
-def get_working_model_safely():
-    """Находит правильное имя модели, поддерживаемое вашим API ключом"""
+def get_verified_model():
+    """Проверяет все доступные модели и выбирает реально рабочую"""
+    available_models = []
     try:
-        # Получаем список всех моделей
-        all_models = genai.list_models()
-        # Фильтруем: нужна 1.5 Flash (высокая квота), но НЕ 2.5 (низкая квота)
-        candidates = [
-            m.name for m in all_models 
-            if 'generateContent' in m.supported_generation_methods 
-            and "1.5-flash" in m.name 
-            and "2.5" not in m.name
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                available_models.append(m.name)
+        
+        # Приоритетный поиск стабильной 1.5 Flash
+        # Исключаем 2.0 и 2.5 из-за низких квот (ошибка 429)
+        priority_order = [
+            "models/gemini-1.5-flash-latest",
+            "models/gemini-1.5-flash",
+            "models/gemini-1.5-pro",
+            "gemini-1.5-flash"
         ]
-        if candidates:
-            # Возвращаем первое найденное имя (обычно это models/gemini-1.5-flash)
-            return candidates[0]
-        return "gemini-1.5-flash" # Резервный вариант
-    except Exception:
-        return "gemini-1.5-flash"
+        
+        for p in priority_order:
+            if p in available_models:
+                return p
+        
+        # Если ничего из списка не подошло, берем первую доступную
+        return available_models[0] if available_models else "gemini-1.5-flash"
+    except Exception as e:
+        return f"ERROR_LISTING: {str(e)}"
 
-ACTIVE_MODEL_NAME = get_working_model_safely()
-model = genai.GenerativeModel(model_name=ACTIVE_MODEL_NAME)
+ACTIVE_MODEL_NAME = get_verified_model()
 
-# --- 3. ОБРАБОТКА PDF ---
+# Инициализация модели
+try:
+    model = genai.GenerativeModel(model_name=ACTIVE_MODEL_NAME)
+except:
+    model = None
+
+# --- 3. ОБРАБОТКА PDF (ВАШИ ПРИОРИТЕТЫ) ---
 def load_docs_engine():
     docs_path = "./docs"
-    if not os.path.exists(docs_path):
-        st.error(f"Папка {docs_path} не найдена!")
-        return []
-    
+    if not os.path.exists(docs_path): return []
     files = [f for f in os.listdir(docs_path) if f.endswith(".pdf")]
-    if not files:
-        st.warning("В папке /docs нет PDF файлов.")
-        return []
-    
     all_chunks = []
-    progress_bar = st.progress(0)
-    status_text = st.empty()
+    
+    progress = st.progress(0)
+    status = st.empty()
     
     for i, f in enumerate(files):
-        status_text.text(f"Индексация: {f}...")
+        status.text(f"Загрузка: {f}...")
         try:
             loader = PyPDFLoader(os.path.join(docs_path, f))
             pages = loader.load()
             splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
             all_chunks.extend(splitter.split_documents(pages))
         except Exception as e:
-            st.error(f"Ошибка в файле {f}: {str(e)}")
-        progress_bar.progress((i + 1) / len(files))
+            st.error(f"Файл {f}: {e}")
+        progress.progress((i + 1) / len(files))
     
-    status_text.text("✅ База знаний готова!")
+    status.text("✅ Документы загружены")
     return all_chunks
 
-# --- 4. УПРАВЛЕНИЕ СОСТОЯНИЕМ ---
 if "chunks" not in st.session_state:
     st.session_state.chunks = None
-
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# --- 5. ИНТЕРФЕЙС ---
+# --- 4. ИНТЕРФЕЙС ---
 st.title("🏗️ MaxPatrol 10: Verified Engineer")
 
 with st.sidebar:
-    st.header("База знаний")
-    if st.button("🔄 Обновить документы"):
-        with st.spinner("Загрузка..."):
-            st.session_state.chunks = load_docs_engine()
+    st.header("Настройки")
+    if st.button("🔄 Индексировать PDF"):
+        st.session_state.chunks = load_docs_engine()
     
-    if st.button("🗑️ Очистить историю"):
+    st.divider()
+    st.write("**Диагностика:**")
+    st.code(f"Текущая модель: {ACTIVE_MODEL_NAME}")
+    
+    if st.button("🗑️ Очистить чат"):
         st.session_state.messages = []
         st.rerun()
-
-    st.divider()
-    st.info(f"Используется: `{ACTIVE_MODEL_NAME}`")
 
 def get_context(query, chunks):
     if not chunks: return [], ""
     query_low = query.lower()
     scored = []
-    # Ваши приоритеты из сохраненной инструкции
+    # Реализация ваших требований по поиску (Admin/Operator/Implement)
     priority_keywords = ['adminguide', 'operatorguide', 'implementguide']
     
     for c in chunks:
         content_low = c.page_content.lower()
         filename = os.path.basename(c.metadata.get('source', '')).lower()
+        
         score = sum(10 for w in query_low.split() if len(w) > 3 and w in content_low)
         
-        # Приоритезация по именам файлов
+        # Поиск по именам файлов из вашей инструкции
         if any(k in filename for k in priority_keywords):
             score *= 3.0
         else:
@@ -143,19 +144,14 @@ def get_context(query, chunks):
         context_text += f"\n[{label}]\n{c.page_content}\n"
     return raw_data, context_text
 
-# Отображение чата
+# Чат
 for i, m in enumerate(st.session_state.messages):
     with st.chat_message(m["role"]):
         st.markdown(m["content"])
-        if m["role"] == "assistant" and m.get("sources"):
-            with st.expander("📚 Источники"):
-                for s in m["sources"]:
-                    st.caption(f"**{s['file']}, стр. {s['page']}**")
 
-# Ввод запроса
-if prompt := st.chat_input("Настроить группу активов..."):
+if prompt := st.chat_input("Ваш запрос..."):
     if not st.session_state.chunks:
-        st.warning("Пожалуйста, сначала нажмите 'Обновить документы' в меню слева.")
+        st.warning("Сначала проиндексируйте документы в левой панели.")
     else:
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
@@ -164,19 +160,15 @@ if prompt := st.chat_input("Настроить группу активов..."):
         with st.chat_message("assistant"):
             sources, context = get_context(prompt, st.session_state.chunks)
             
-            sys_instr = (
-                "Ты технический инженер MP10. Отвечай только на основе контекста. "
-                "Если в контексте есть инструкция, напиши её пошагово. "
-                "В конце напиши: ИСПОЛЬЗОВАННЫЕ_МЕТКИ: ID_1, ID_2..."
-            )
+            sys_instr = "Ты инженер MP10. Отвечай только по контексту. В конце напиши: ИСПОЛЬЗОВАННЫЕ_МЕТКИ: ID_1..."
             
             try:
+                # Прямой вызов с явным указанием генерации
                 response = model.generate_content(
-                    f"{sys_instr}\n\nКонтекст:\n{context}\n\nВопрос: {prompt}",
-                    generation_config={"temperature": 0.1}
+                    f"{sys_instr}\n\nКонтекст:\n{context}\n\nВопрос: {prompt}"
                 )
-                text = response.text
                 
+                text = response.text
                 clean_text = re.sub(r'ИСПОЛЬЗОВАННЫЕ_МЕТКИ:.*', '', text).strip()
                 used_ids = re.findall(r'ID_\d+', text)
                 verified = [s for s in sources if s['label'] in used_ids] or sources[:1]
@@ -189,6 +181,7 @@ if prompt := st.chat_input("Настроить группу активов..."):
                 
                 st.markdown(full_response)
                 copy_to_clipboard(full_response, "cur")
-                st.session_state.messages.append({"role": "assistant", "content": full_response, "sources": verified})
+                st.session_state.messages.append({"role": "assistant", "content": full_response})
             except Exception as e:
-                st.error(f"Ошибка API: {e}. Попробуйте обновить страницу.")
+                st.error(f"Ошибка API: {e}")
+                st.info("Посмотрите в боковую панель — какая модель там указана?")
