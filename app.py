@@ -32,12 +32,12 @@ API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 # --- 3. ВЫБОР ВЕРСИИ (ДОБАВЛЕНО) ---
 # Список доступных версий (папок в ./docs)
-available_versions = ["v27.6", "v26.0", "v25.1"]
+available_versions = ["27.6", "8.7"]
 
 with st.sidebar:
     st.header("Настройки")
     selected_ver = st.selectbox(
-        "Версия MaxPatrol 10:",
+        "Версия MaxPatrol SIEM:",
         available_versions,
         index=0,
         help="Выберите версию системы для поиска в соответствующей документации"
