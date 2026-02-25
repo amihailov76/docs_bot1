@@ -25,7 +25,7 @@ def copy_to_clipboard(text, key):
     """
     components.html(js_code, height=45)
 
-# --- 2. КОНФИГУРАЦИЯ GOOGLE AI С АВТОПОДБОРОМ ---
+# --- 2. КОНФИГУРАЦИЯ GOOGLE AI ---
 api_key = st.secrets.get("GOOGLE_API_KEY")
 genai.configure(api_key=api_key)
 
@@ -34,18 +34,17 @@ def get_working_model():
     try:
         for m in genai.list_models():
             if 'generateContent' in m.supported_generation_methods:
-                if "flash" in m.name:
-                    return m.name
-        return "gemini-1.5-flash" 
-    except Exception as e:
+                if "flash" in m.name: return m.name
+        return "gemini-1.5-flash"
+    except:
         return "gemini-1.5-flash"
 
 WORKING_MODEL_NAME = get_working_model()
 st.sidebar.write(f"🤖 Модель: `{WORKING_MODEL_NAME}`")
 
 model = genai.GenerativeModel(
-  model_name=WORKING_MODEL_NAME,
-  generation_config={"temperature": 0.0}
+    model_name=WORKING_MODEL_NAME,
+    generation_config={"temperature": 0.0}
 )
 
 # --- 3. ОБРАБОТКА PDF ---
@@ -60,7 +59,7 @@ def load_docs_engine():
         try:
             loader = PyPDFLoader(os.path.join(docs_path, f))
             pages = loader.load()
-            splitter = RecursiveCharacterTextSplitter(chunk_size=1500, chunk_overlap=250)
+            splitter = RecursiveCharacterTextSplitter(chunk_size=1800, chunk_overlap=300)
             all_chunks.extend(splitter.split_documents(pages))
         except Exception as e:
             st.error(f"Ошибка в файле {f}: {e}")
@@ -77,14 +76,15 @@ def get_context(query, chunks):
         if score > 0: scored.append((score, c))
     scored.sort(key=lambda x: x[0], reverse=True)
     top_chunks = scored[:5]
+    
     raw_data = []
     context_text = ""
     for _, c in top_chunks:
         filename = os.path.basename(c.metadata.get('source', 'unknown'))
         page_num = c.metadata.get('page', 0) + 1
-        label = f"SOURCE_{filename}_PAGE_{page_num}".replace(" ", "_")
+        label = f"REF_ID_{filename}_P{page_num}".replace(" ", "_")
         raw_data.append({"label": label, "content": c.page_content, "file": filename, "page": page_num})
-        context_text += f"\n--- ИСТОЧНИК_МЕТКА: {label} ---\n{c.page_content}\n"
+        context_text += f"\n[ДАННЫЕ ИЗ {label}]\n{c.page_content}\n"
     return raw_data, context_text
 
 # --- 4. ИНТЕРФЕЙС ---
@@ -118,10 +118,12 @@ if prompt := st.chat_input("Запросить технические данны
         raw_candidates, context_for_ai = get_context(prompt, chunks)
         with st.spinner("Анализ документации..."):
             system_instruction = (
-                "Ты инженерный эксперт. Отвечай только по контексту. "
-                "В конце сделай список '### Ссылки на документацию' с новой строки через дефис: "
-                "- <Название>, <Раздел>, стр. <№>, <файл> (SOURCE_<имя>_PAGE_<номер>). "
-                "Метка SOURCE_ должна быть в конце каждой строки. Между ответом и ссылками 2 отступа."
+                "Ты инженерный эксперт. Отвечай ТОЛЬКО на основе предоставленного контекста. "
+                "В самом конце ответа создай раздел '### Ссылки на документацию'. "
+                "Каждую ссылку пиши С НОВОЙ СТРОКИ в формате:\n"
+                "- Название документа, Название раздела, стр. НомерСтраницы, имя_файла.pdf (ТЕХ_МЕТКА)\n\n"
+                "ГДЕ ТЕХ_МЕТКА — это строго точное название [ДАННЫЕ ИЗ REF_ID_...] из контекста. "
+                "НЕ дублируй номер страницы в конце. НЕ оставляй лишних скобок."
             )
             
             try:
@@ -129,11 +131,14 @@ if prompt := st.chat_input("Запросить технические данны
                 if response.text:
                     full_response = response.text
                     
-                    # ГИБКОЕ СОПОСТАВЛЕНИЕ: ищем наличие метки в тексте
+                    # 1. Сначала определяем, какие выдержки показать в блоке пруфов
                     verified_sources = [s for s in raw_candidates if s['label'] in full_response]
                     
-                    # ОЧИСТКА: удаляем технические метки (SOURCE_...) из финального текста
-                    clean_answer = re.sub(r'\(?SOURCE_.*?_PAGE_.*?\)?', '', full_response).strip()
+                    # 2. Очищаем текст от тех. меток. Регулярка ищет (REF_ID_...) или (ТЕХ_МЕТКА)
+                    # Она удаляет всё, что похоже на наши внутренние ID
+                    clean_answer = re.sub(r'\(?REF_ID_.*?\)?', '', full_response)
+                    clean_answer = re.sub(r'\(?ТЕХ_МЕТКА\)?', '', clean_answer)
+                    clean_answer = clean_answer.replace("()", "").strip()
                 else:
                     clean_answer = "⚠️ Ответ заблокирован или пуст."
                     verified_sources = []
