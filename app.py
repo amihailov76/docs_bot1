@@ -25,40 +25,43 @@ def copy_to_clipboard(text, key):
     """
     components.html(js_code, height=45)
 
-# --- 2. КОНФИГУРАЦИЯ API (АДАПТИВНАЯ МОДЕЛЬ) ---
+# --- 2. ЖЕСТКАЯ ФИЛЬТРАЦИЯ МОДЕЛИ ---
 api_key = st.secrets.get("GOOGLE_API_KEY")
 genai.configure(api_key=api_key)
 
-# Функция для безопасного создания модели
-def initialize_model():
-    # Список возможных имен для Gemini 1.5 Flash в разных версиях API
-    model_variants = ["gemini-1.5-flash", "models/gemini-1.5-flash", "gemini-1.5-flash-latest"]
-    
-    for model_name in model_variants:
-        try:
-            m = genai.GenerativeModel(model_name=model_name, generation_config={"temperature": 0.1})
-            # Пробный вызов (минимальный), чтобы проверить доступность
-            m.generate_content("test", generation_config={"max_output_tokens": 1})
-            return m, model_name
-        except Exception:
-            continue
-    
-    # Если ни один вариант не сработал, пробуем получить список через API
+# Очищаем кэш ресурсов, чтобы принудительно применить новый выбор модели
+st.cache_resource.clear()
+
+@st.cache_resource
+def force_stable_model():
+    """
+    Функция принудительного поиска модели 1.5-flash.
+    Игнорирует любые упоминания 2.0, 2.5 или experimental.
+    """
     try:
-        available = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        # Берем первую, где есть "1.5-flash", но нет "2.0" или "2.5"
-        for a in available:
-            if "1.5-flash" in a and "2." not in a:
-                return genai.GenerativeModel(model_name=a, generation_config={"temperature": 0.1}), a
-        return genai.GenerativeModel(model_name=available[0]), available[0]
+        all_models = genai.list_models()
+        # Ищем строго 1.5-flash, игнорируя новинки с лимитом 20 запросов
+        for m in all_models:
+            name = m.name.lower()
+            if "1.5-flash" in name and "2.0" not in name and "2.5" not in name and "experimental" not in name:
+                # Проверяем поддержку генерации
+                if 'generateContent' in m.supported_generation_methods:
+                    return m.name
+        
+        # Если поиск по списку не дал результатов, возвращаем стандартное имя
+        return "models/gemini-1.5-flash"
     except:
-        # Последний рубеж
-        return genai.GenerativeModel(model_name="gemini-1.5-flash"), "gemini-1.5-flash"
+        return "models/gemini-1.5-flash"
 
-model, active_model_name = initialize_model()
-st.sidebar.success(f"🤖 Движок: `{active_model_name}`")
+WORKING_MODEL_NAME = force_stable_model()
+st.sidebar.warning(f"⚠️ Активный движок: {WORKING_MODEL_NAME}")
 
-# --- 3. ОБРАБОТКА PDF С ПРИОРИТЕТАМИ ---
+model = genai.GenerativeModel(
+    model_name=WORKING_MODEL_NAME,
+    generation_config={"temperature": 0.1}
+)
+
+# --- 3. ОБРАБОТКА PDF С ВЕСАМИ (ВАША ИНСТРУКЦИЯ) ---
 @st.cache_resource
 def load_docs_engine():
     docs_path = "./docs"
@@ -92,18 +95,19 @@ def get_context(query, chunks):
         filename_low = os.path.basename(c.metadata.get('source', '')).lower()
         score = 0
         
+        # Базовый скоринг текста
         if query_low in content_low:
             score += 100 
         for w in query_words:
             if w in content_low:
                 score += 10
         
-        # Приоритезация файлов
+        # Взвешивание файлов
         is_priority = any(k in filename_low for k in priority_keywords)
         if is_priority:
-            score *= 3.0
+            score *= 3.0 # Утроенный вес для гайдов
         else:
-            score *= 0.6
+            score *= 0.6 # Пониженный вес для справочников
         
         if score > 0:
             scored.append((score, c))
@@ -119,7 +123,7 @@ def get_context(query, chunks):
         label = f"ID_{i+1}"
         
         lines = [l.strip() for l in c.page_content.split('\n') if len(l.strip()) > 5]
-        section = lines[0] if lines else "Технический раздел"
+        section = lines[0] if lines else "Раздел документации"
         
         raw_data.append({
             "label": label, "content": c.page_content, 
@@ -131,7 +135,8 @@ def get_context(query, chunks):
 # --- 4. ИНТЕРФЕЙС ---
 st.title("🏗️ MaxPatrol 10: Verified Engineer")
 
-if st.sidebar.button("Очистить историю"):
+if st.sidebar.button("Очистить историю и кэш"):
+    st.cache_resource.clear()
     st.session_state.messages = []
     st.rerun()
 
@@ -148,7 +153,7 @@ for i, m in enumerate(st.session_state.messages):
                     for src in m["verified_sources"]:
                         st.info(f"**{src['file']}, стр. {src['page']}**\n\n{src['content']}")
 
-if prompt := st.chat_input("Запрос к документации..."):
+if prompt := st.chat_input("Ваш технический вопрос..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
@@ -156,15 +161,14 @@ if prompt := st.chat_input("Запрос к документации..."):
     with st.chat_message("assistant"):
         raw_candidates, context_for_ai = get_context(prompt, chunks)
         
-        with st.spinner("Анализирую источники..."):
+        with st.spinner("Анализ документации..."):
             system_instruction = (
-                "Ты техподдержка MaxPatrol 10. Отвечай строго по контексту. "
+                "Ты техподдержка MaxPatrol 10. Отвечай только по контексту. "
                 "Если есть шаги настройки — выпиши их. В конце укажи: "
                 "ИСПОЛЬЗОВАННЫЕ_МЕТКИ: ID_1, ID_2"
             )
             
             try:
-                # ВАЖНО: Мы используем ранее проинициализированную модель
                 response = model.generate_content(f"{system_instruction}\n\nКОНТЕКСТ:\n{context_for_ai}\n\nВОПРОС:\n{prompt}")
                 
                 if response.text:
@@ -185,10 +189,10 @@ if prompt := st.chat_input("Запрос к документации..."):
                     
                     final_answer = clean_answer + links_block
                 else:
-                    final_answer = "Ошибка генерации. Попробуйте еще раз."
+                    final_answer = "Ошибка генерации. Проверьте контекст."
                     verified_sources = []
             except Exception as e:
-                final_answer = f"❌ Системная ошибка: {str(e)}"
+                final_answer = f"❌ Ошибка API: {str(e)}"
                 verified_sources = []
 
         st.markdown(final_answer)
