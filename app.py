@@ -24,22 +24,38 @@ def copy_to_clipboard(text, key):
     </script>"""
     components.html(js_code, height=45)
 
-# --- 2. ПАРАМЕТРЫ МОДЕЛИ (ПЕРЕХОД НА 1.5 FLASH) ---
+# --- 2. ПАРАМЕТРЫ МОДЕЛИ (ФИНАЛЬНЫЙ ФИКС ФОРМАТА) ---
 API_KEY = st.secrets.get("GOOGLE_API_KEY")
-# Используем 1.5 Flash - у нее самые высокие лимиты в Free Tier
-SELECTED_MODEL = "models/gemini-flash-latest "
+# Берем имя из вашего списка. Если оно с "models/", убираем префикс для URL
+RAW_MODEL_NAME = "models/gemini-flash-latest"
+CLEAN_MODEL_NAME = RAW_MODEL_NAME.replace("models/", "")
 
 def call_gemini(prompt):
-    url = f"https://generativelanguage.googleapis.com/v1beta/{SELECTED_MODEL}:generateContent?key={API_KEY}"
+    # Формируем URL. В v1beta/v1 адрес должен быть: /models/{name}:generateContent
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{CLEAN_MODEL_NAME}:generateContent?key={API_KEY}"
+    
+    headers = {'Content-Type': 'application/json'}
+    
+    # ВАЖНО: В payload НЕ ДОЛЖНО быть поля "model", 
+    # так как имя уже есть в URL. Только "contents".
     payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 2048}
+        "contents": [
+            {
+                "parts": [{"text": prompt}]
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0.1,
+            "maxOutputTokens": 2048
+        }
     }
+    
     try:
-        res = requests.post(url, json=payload, timeout=20)
+        res = requests.post(url, headers=headers, json=payload, timeout=20)
         if res.status_code == 200:
             return res.json()['candidates'][0]['content']['parts'][0]['text']
-        return f"Ошибка API {res.status_code}: {res.text}"
+        else:
+            return f"Ошибка API {res.status_code}: {res.text}"
     except Exception as e:
         return f"Ошибка соединения: {str(e)}"
 
