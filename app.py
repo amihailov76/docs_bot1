@@ -107,7 +107,7 @@ for i, m in enumerate(st.session_state.messages):
     with st.chat_message(m["role"]):
         st.markdown(m["content"])
         if m["role"] == "assistant":
-           copy_to_clipboard(m["content"], f"msg_{i}")
+            copy_to_clipboard(m["content"], f"msg_{i}")
             verified = m.get("verified_sources", [])
             if verified:
                 with st.expander(f"✅ Подтверждающие выдержки"):
