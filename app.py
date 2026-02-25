@@ -25,20 +25,43 @@ def copy_to_clipboard(text, key):
     """
     components.html(js_code, height=45)
 
-# --- 2. КОНФИГУРАЦИЯ API ---
+# --- 2. УМНАЯ КОНФИГУРАЦИЯ МОДЕЛИ (ОБХОД 404 И 429) ---
 api_key = st.secrets.get("GOOGLE_API_KEY")
 genai.configure(api_key=api_key)
 
-# Фиксируем стабильную модель 1.5 Flash для обхода лимита в 20 запросов
-WORKING_MODEL_NAME = "gemini-1.5-flash"
-st.sidebar.write(f"🤖 Движок: `{WORKING_MODEL_NAME}` (High Quota)")
+@st.cache_resource
+def get_stable_model():
+    try:
+        # Ищем все модели, поддерживающие генерацию контента
+        available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        
+        # 1. Сначала ищем 1.5 Flash (у неё лимит 1500 запросов/день, а не 20)
+        for name in available_models:
+            if "gemini-1.5-flash" in name and "latest" in name:
+                return name
+        for name in available_models:
+            if "gemini-1.5-flash" in name:
+                return name
+        
+        # 2. Если 1.5 Flash нет, берем любую доступную 1.5 Pro
+        for name in available_models:
+            if "gemini-1.5-pro" in name:
+                return name
+        
+        # 3. Крайний случай - берем первую из списка
+        return available_models[0]
+    except Exception:
+        return "models/gemini-1.5-flash"
+
+WORKING_MODEL_NAME = get_stable_model()
+st.sidebar.info(f"🚀 Активная модель: `{WORKING_MODEL_NAME}`")
 
 model = genai.GenerativeModel(
     model_name=WORKING_MODEL_NAME,
     generation_config={"temperature": 0.2}
 )
 
-# --- 3. ОБРАБОТКА PDF ---
+# --- 3. ОБРАБОТКА PDF С ВЕСАМИ ---
 @st.cache_resource
 def load_docs_engine():
     docs_path = "./docs"
@@ -50,6 +73,7 @@ def load_docs_engine():
         try:
             loader = PyPDFLoader(os.path.join(docs_path, f))
             pages = loader.load()
+            # Оптимальный размер чанка для инженерной документации
             splitter = RecursiveCharacterTextSplitter(chunk_size=1200, chunk_overlap=250)
             all_chunks.extend(splitter.split_documents(pages))
         except Exception as e:
@@ -64,7 +88,7 @@ def get_context(query, chunks):
     query_words = [w for w in query_low.split() if len(w) > 3]
     scored = []
     
-    # Приоритетные типы документов согласно вашим инструкциям
+    # Ваши приоритетные источники
     priority_keywords = ['adminguide', 'operatorguide', 'implementguide']
     
     for c in chunks:
@@ -72,19 +96,19 @@ def get_context(query, chunks):
         filename_low = os.path.basename(c.metadata.get('source', '')).lower()
         score = 0
         
-        # Поиск совпадений
+        # Базовый скоринг
         if query_low in content_low:
             score += 100 
         for w in query_words:
             if w in content_low:
                 score += 10
         
-        # Применение весов (ПРИОРИТЕТ: Admin, Operator, Implement)
+        # ПРИМЕНЕНИЕ ВЕСОВ (Удвоенный приоритет для гайдов)
         is_priority = any(k in filename_low for k in priority_keywords)
         if is_priority:
-            score *= 2.5  # Значительное повышение для руководств
+            score *= 2.5
         else:
-            score *= 0.7  # Снижение для справочников (refguide и др.)
+            score *= 0.7
         
         if score > 0:
             scored.append((score, c))
@@ -99,8 +123,9 @@ def get_context(query, chunks):
         page_num = c.metadata.get('page', 0) + 1
         label = f"ID_{i+1}"
         
+        # Попытка вытащить заголовок раздела
         lines = [l.strip() for l in c.page_content.split('\n') if len(l.strip()) > 3]
-        section = lines[0] if lines else "Технический раздел"
+        section = lines[0] if lines else "Техническое описание"
         
         raw_data.append({
             "label": label, 
@@ -113,7 +138,7 @@ def get_context(query, chunks):
     return raw_data, context_text
 
 # --- 4. ИНТЕРФЕЙС ---
-st.title("🏗️ MaxPatrol 10: Инженерная поддержка")
+st.title("🏗️ MaxPatrol 10: Verified Engineer")
 
 if st.sidebar.button("Очистить историю"):
     st.session_state.messages = []
@@ -140,11 +165,11 @@ if prompt := st.chat_input("Напишите технический вопрос
     with st.chat_message("assistant"):
         raw_candidates, context_for_ai = get_context(prompt, chunks)
         
-        with st.spinner("Поиск в документации..."):
+        with st.spinner("Анализирую документацию..."):
             system_instruction = (
-                "Ты — эксперт по MaxPatrol 10. Отвечай только по предоставленному контексту. "
-                "Если в контексте есть пошаговая инструкция, приведи её полностью. "
-                "Не выдумывай информацию. В конце ответа укажи только ID источников через запятую: "
+                "Ты технический эксперт. Твоя цель — найти в контексте ответ на вопрос. "
+                "Если в тексте есть пошаговый алгоритм, опиши его детально. "
+                "В конце ответа ОБЯЗАТЕЛЬНО укажи ID источников через запятую: "
                 "ИСПОЛЬЗОВАННЫЕ_МЕТКИ: ID_1, ID_2"
             )
             
@@ -168,21 +193,21 @@ if prompt := st.chat_input("Напишите технический вопрос
                             doc_title = src['file'].replace('_', ' ').replace('.pdf', '').title()
                             links_block += f"- {doc_title}, {src['section']}, стр. {src['page']}, {src['file']}\n"
                     else:
-                        links_block = "\n\n*Информация в документации не найдена.*"
+                        links_block = "\n\n*Информации в документации не найдено.*"
                     
                     final_answer = clean_answer + links_block
                 else:
-                    final_answer = "Ошибка генерации ответа."
+                    final_answer = "К сожалению, модель не смогла сгенерировать текст."
                     verified_sources = []
             except Exception as e:
-                final_answer = f"❌ Ошибка квот или API: {str(e)}"
+                final_answer = f"❌ Ошибка: {str(e)}"
                 verified_sources = []
 
         st.markdown(final_answer)
         copy_to_clipboard(final_answer, "new_msg")
         
         if verified_sources:
-            with st.expander("✅ Подтверждающие выдержки"):
+            with st.expander("✅ Подтверждающие выдержки", expanded=False):
                 for src in verified_sources:
                     st.info(f"**{src['file']}, стр. {src['page']}**\n\n{src['content']}")
         
