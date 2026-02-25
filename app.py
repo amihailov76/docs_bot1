@@ -115,7 +115,7 @@ for i, m in enumerate(st.session_state.messages):
                         st.success(f"**Источник: {src.get('file')}, стр. {src.get('page')}**")
                         st.text(src.get('content'))
 
-if prompt := st.chat_input("Запросить данные по MP10..."):
+if prompt := st.chat_input("Задать вопрос по MaxPatrol SIEM..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
