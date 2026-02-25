@@ -26,11 +26,27 @@ def copy_to_clipboard(text, key):
     """
     components.html(js_code, height=45)
 
-# --- 2. ИНИЦИАЛИЗАЦИЯ (СТАБИЛЬНАЯ V1) ---
+# --- 2. УМНАЯ ИНИЦИАЛИЗАЦИЯ (АВТОПОДБОР ИМЕНИ) ---
 api_key = st.secrets.get("GOOGLE_API_KEY")
-# Используем v1 для исключения 404
-client = genai.Client(api_key=api_key, http_options={'api_version': 'v1'})
-STABLE_MODEL_ID = "gemini-1.5-flash"
+client = genai.Client(api_key=api_key)
+
+@st.cache_resource
+def discover_model():
+    """Автоматически находит правильное имя модели в текущем окружении"""
+    try:
+        # Получаем список всех моделей, доступных вашему ключу
+        models = client.models.list()
+        # Ищем 1.5 Flash, отдаем приоритет стабильным версиям без '2.'
+        candidates = [m.name for m in models if "1.5-flash" in m.name.lower() and "2." not in m.name]
+        
+        if candidates:
+            # Возвращаем имя (например, 'gemini-1.5-flash' или 'models/gemini-1.5-flash')
+            return candidates[0]
+        return "gemini-1.5-flash" # Резервный вариант
+    except:
+        return "gemini-1.5-flash"
+
+STABLE_MODEL_ID = discover_model()
 
 # --- 3. ОБРАБОТКА PDF ---
 @st.cache_resource
@@ -63,13 +79,14 @@ with st.sidebar:
         st.session_state.messages = []
         st.rerun()
     st.divider()
-    st.success(f"Движок: `{STABLE_MODEL_ID}`")
+    st.write(f"**Активное имя модели:**")
+    st.code(STABLE_MODEL_ID)
 
 def get_context(query, chunks):
     if not chunks: return [], ""
     q = query.lower()
     scored = []
-    # Ваши приоритеты из сохраненной инструкции
+    # Ваши приоритеты из сохраненной инструкции (adminguide, operatorguide, implementguide)
     priority = ['adminguide', 'operatorguide', 'implementguide']
     for c in chunks:
         txt = c.page_content.lower()
@@ -99,15 +116,15 @@ if prompt := st.chat_input("Ваш запрос..."):
         with st.chat_message("assistant"):
             sources, context = get_context(prompt, st.session_state.chunks)
             try:
-                # ПЕРЕНОСИМ ИНСТРУКЦИЮ ВНУТРЬ CONTENTS (ФИКС 400)
+                # Объединяем всё в один промпт для максимальной совместимости
                 full_prompt = (
-                    "ИНСТРУКЦИЯ: Ты инженер техподдержки MaxPatrol 10. Отвечай кратко и только на основе контекста. "
-                    "Если есть шаги, пиши по порядку. В конце укажи: ИСПОЛЬЗОВАННЫЕ_МЕТКИ: ID_1, ID_2...\n\n"
-                    f"КОНТЕКСТ ДОКУМЕНТАЦИИ:\n{context}\n\n"
+                    "Ты инженер техподдержки MaxPatrol 10. Твоя задача — отвечать на вопросы, "
+                    "используя предоставленный ниже контекст. Отвечай кратко, по делу. "
+                    "В конце обязательно укажи: ИСПОЛЬЗОВАННЫЕ_МЕТКИ: ID_1, ID_2...\n\n"
+                    f"КОНТЕКСТ:\n{context}\n\n"
                     f"ВОПРОС: {prompt}"
                 )
                 
-                # Чистая генерация без системных полей
                 response = client.models.generate_content(
                     model=STABLE_MODEL_ID,
                     contents=full_prompt,
@@ -123,4 +140,10 @@ if prompt := st.chat_input("Ваш запрос..."):
                 st.markdown(ans)
                 copy_to_clipboard(ans, "c")
                 st.session_state.messages.append({"role": "assistant", "content": ans})
-            except Exception as e: st.error(f"Ошибка API: {e}")
+            except Exception as e: 
+                st.error(f"Ошибка API: {e}")
+                # Если все же ошибка, покажем список имен, чтобы понять, что не так
+                try:
+                    all_m = [m.name for m in client.models.list()]
+                    st.write("Список доступных имен моделей:", all_m)
+                except: pass
