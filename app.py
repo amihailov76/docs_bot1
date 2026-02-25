@@ -8,8 +8,6 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 # --- 1. НАСТРОЙКА ---
 st.set_page_config(page_title="Engineer Verified Pro (Public)", layout="wide")
 
-# (Блок пароля удален)
-
 # --- 2. КОНФИГУРАЦИЯ API ---
 api_key = st.secrets.get("GOOGLE_API_KEY")
 MODEL_ID = "gemini-2.5-flash" 
@@ -29,7 +27,8 @@ def load_docs_engine():
         try:
             loader = PyPDFLoader(os.path.join(docs_path, f))
             pages = loader.load()
-            splitter = RecursiveCharacterTextSplitter(chunk_size=1500, chunk_overlap=200)
+            # Чанки чуть больше, чтобы захватить заголовки разделов
+            splitter = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=300)
             all_chunks.extend(splitter.split_documents(pages))
         except Exception as e:
             st.error(f"Ошибка в {f}: {e}")
@@ -53,51 +52,53 @@ def get_context(query, chunks):
     raw_data = []
     context_text = ""
     for _, c in top_chunks:
-        header = f"Файл: {os.path.basename(c.metadata['source'])}, Стр: {c.metadata['page'] + 1}"
-        raw_data.append({"header": header, "content": c.page_content})
-        context_text += f"\n--- {header} ---\n{c.page_content}\n"
+        filename = os.path.basename(c.metadata['source'])
+        page_num = c.metadata['page'] + 1
+        # Метка для поиска в ответе
+        label = f"{filename}_p{page_num}"
+        
+        raw_data.append({"label": label, "content": c.page_content, "file": filename, "page": page_num})
+        context_text += f"\n--- ИСТОЧНИК: {label} ---\n{c.page_content}\n"
         
     return raw_data, context_text
 
 # --- 4. ИНТЕРФЕЙС ---
 st.title("🏗️ Технический контроль (Общий доступ)")
-st.info("Бот доступен без пароля. Режим верификации источников активен.")
+st.info("Режим: Чистый текст + Детальные ссылки. Кнопка 'Показать всё' удалена.")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Отрисовка истории
 for i, m in enumerate(st.session_state.messages):
     with st.chat_message(m["role"]):
         st.markdown(m["content"])
-        
         if "verified_sources" in m and m["verified_sources"]:
             with st.expander(f"✅ Подтверждающие выдержки (к ответу №{i//2 + 1})"):
                 for src in m["verified_sources"]:
-                    st.success(f"**{src['header']}**")
-                    st.text(src['content'])
-            
-            with st.expander(f"⚙️ Показать всё найденное (RAW Context)"):
-                for src in m["all_found"]:
-                    st.caption(f"**{src['header']}**")
+                    st.success(f"**Источник: {src['file']}, стр. {src['page']}**")
                     st.text(src['content'])
 
-# Ввод
 if prompt := st.chat_input("Запросить данные..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        all_found, context_for_ai = get_context(prompt, chunks)
+        raw_candidates, context_for_ai = get_context(prompt, chunks)
         
         with st.spinner("Анализ документации..."):
             system_instruction = """
-            Ты — промышленный ИИ-эксперт. 
-            Отвечай ТОЛЬКО по контексту. 
-            В конце ВСЕГДА пиши раздел '### Ссылки на документацию'.
-            Каждая ссылка должна быть строго в формате: 'Файл: [имя], Стр: [номер]'.
-            Не используй ссылки в тексте.
+            Ты — промышленный ИИ-эксперт. Отвечай ТОЛЬКО по контексту. 
+            
+            ФОРМАТ ССЫЛОК В КОНЦЕ:
+            1. Создай раздел '### Ссылки на документацию'.
+            2. Каждый источник пиши С НОВОЙ СТРОКИ.
+            3. Шаблон ссылки: <Название документа>, <Номер и название раздела>, стр. <номер>, <имя PDF-файла>.
+               Пример: Руководство администратора, 5.1 Создание правила, стр. 34, manual.pdf
+            4. Если название раздела не найдено в тексте, пиши 'Раздел не указан'.
+            5. Название документа бери из самого текста или имени файла.
+            
+            Для связи источников с выдержками, обязательно в конце каждой строки ссылки в скобках укажи техническую метку файла (например: (FILENAME_pPAGE)).
             """
             
             payload = {
@@ -108,27 +109,28 @@ if prompt := st.chat_input("Запросить данные..."):
             try:
                 response = requests.post(API_URL, json=payload, timeout=40)
                 answer = response.json()['candidates'][0]['content']['parts'][0]['text']
-                verified_sources = [s for s in all_found if s['header'] in answer]
+                
+                # Фильтрация только подтвержденных выдержек
+                verified_sources = [s for s in raw_candidates if s['label'] in answer]
+                
+                # Очищаем ответ от технических меток (типа FILENAME_pPAGE), если ИИ их вывел в скобках
+                import re
+                clean_answer = re.sub(r'\(.*\.pdf_p\d+\)', '', answer)
+                
             except:
-                answer = "❌ Ошибка связи с API."
+                clean_answer = "❌ Ошибка связи с API."
                 verified_sources = []
 
-        st.markdown(answer)
+        st.markdown(clean_answer)
         
         if verified_sources:
             with st.expander("✅ Подтверждающие выдержки"):
                 for src in verified_sources:
-                    st.success(f"**{src['header']}**")
+                    st.success(f"**Файл: {src['file']}, Стр: {src['page']}**")
                     st.text(src['content'])
-        
-        with st.expander("⚙️ Показать всё найденное"):
-            for src in all_found:
-                st.caption(f"**{src['header']}**")
-                st.text(src['content'])
         
         st.session_state.messages.append({
             "role": "assistant", 
-            "content": answer, 
-            "verified_sources": verified_sources,
-            "all_found": all_found
+            "content": clean_answer, 
+            "verified_sources": verified_sources
         })
