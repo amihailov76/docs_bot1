@@ -28,7 +28,6 @@ def load_docs_engine():
         try:
             loader = PyPDFLoader(os.path.join(docs_path, f))
             pages = loader.load()
-            # Увеличенный размер чанка, чтобы ИИ видел заголовки разделов
             splitter = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=300)
             all_chunks.extend(splitter.split_documents(pages))
         except Exception as e:
@@ -55,7 +54,6 @@ def get_context(query, chunks):
     for _, c in top_chunks:
         filename = os.path.basename(c.metadata.get('source', 'unknown'))
         page_num = c.metadata.get('page', 0) + 1
-        # Метка для сопоставления (без пробелов для надежности re.sub)
         label = f"SOURCE_{filename}_PAGE_{page_num}".replace(" ", "_")
         
         raw_data.append({
@@ -71,7 +69,6 @@ def get_context(query, chunks):
 # --- 4. ИНТЕРФЕЙС ---
 st.title("🏗️ Технический контроль")
 
-# Кнопка очистки истории (помогает при смене структуры данных)
 if st.sidebar.button("Очистить историю чата"):
     st.session_state.messages = []
     st.rerun()
@@ -79,22 +76,16 @@ if st.sidebar.button("Очистить историю чата"):
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Отрисовка истории
 for i, m in enumerate(st.session_state.messages):
     with st.chat_message(m["role"]):
         st.markdown(m["content"])
-        
-        # Безопасное отображение источников через .get()
         verified = m.get("verified_sources", [])
         if verified:
             with st.expander(f"✅ Подтверждающие выдержки"):
                 for src in verified:
-                    f_name = src.get('file', 'Неизвестный файл')
-                    p_num = src.get('page', '?')
-                    st.success(f"**Источник: {f_name}, стр. {p_num}**")
-                    st.text(src.get('content', 'Текст не найден'))
+                    st.success(f"**Источник: {src.get('file')}, стр. {src.get('page')}**")
+                    st.text(src.get('content'))
 
-# Поле ввода
 if prompt := st.chat_input("Запросить данные..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
@@ -108,10 +99,11 @@ if prompt := st.chat_input("Запросить данные..."):
             Ты — промышленный ИИ-эксперт. Отвечай ТОЛЬКО по контексту. 
             
             ФОРМАТ ССЫЛОК В КОНЦЕ:
-            1. Создай раздел '### Ссылки на документацию'.
-            2. Каждый источник пиши С НОВОЙ СТРОКИ.
-            3. Формат: <Название документа>, <Номер и название раздела>, стр. <номер>, <имя PDF-файла>.
-            4. В самом конце строки ссылки ОБЯЗАТЕЛЬНО добавь метку в скобках, например: (SOURCE_filename.pdf_PAGE_12).
+            1. Создай заголовок '### Ссылки на документацию'.
+            2. ПИШИ КАЖДУЮ ССЫЛКУ С НОВОЙ СТРОКИ ЧЕРЕЗ ДЕФИС (маркированный список).
+            3. Шаблон одной строки: - <Название документа>, <Номер и название раздела>, стр. <номер>, <имя PDF-файла> (SOURCE_имяфайла_PAGE_номер)
+            4. ВАЖНО: Метка в скобках (SOURCE_...) должна быть в конце каждой строки.
+            5. Между основным текстом и ссылками сделай двойной отступ.
             """
             
             payload = {
@@ -123,10 +115,10 @@ if prompt := st.chat_input("Запросить данные..."):
                 response = requests.post(API_URL, json=payload, timeout=40)
                 full_response = response.json()['candidates'][0]['content']['parts'][0]['text']
                 
-                # Фильтруем выдержки: ищем метку label в тексте ответа
+                # Фильтрация выдержек
                 verified_sources = [s for s in raw_candidates if s['label'] in full_response]
                 
-                # Очищаем финальный текст от технических меток (SOURCE_...)
+                # Очистка текста от технических меток
                 clean_answer = re.sub(r'\(SOURCE_.*?_PAGE_.*?\)', '', full_response)
                 
             except Exception as e:
