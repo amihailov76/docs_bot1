@@ -107,6 +107,7 @@ for i, m in enumerate(st.session_state.messages):
     with st.chat_message(m["role"]):
         st.markdown(m["content"])
         if m["role"] == "assistant":
+            st.caption("⚠️ Ответ сгенерирован ИИ на базе Llama 3.3 и может содержать ошибки. Внимательно сверяйте данные с документацией.")
             copy_to_clipboard(m["content"], f"msg_{i}")
             verified = m.get("verified_sources", [])
             if verified:
