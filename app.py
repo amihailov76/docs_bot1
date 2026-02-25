@@ -102,16 +102,24 @@ if st.sidebar.button("Очистить историю чата"):
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Отрисовка истории
+# --- ОТРИСОВКА ИСТОРИИ ЧАТА ---
 for i, m in enumerate(st.session_state.messages):
     with st.chat_message(m["role"]):
         st.markdown(m["content"])
+        
+        # Если это ответ ассистента, добавляем обвесы: кнопку, дисклеймер и источники
         if m["role"] == "assistant":
+            # 1. Дисклеймер (мелкий серый текст сразу под ответом)
+            st.caption("⚠️ Ответ сгенерирован ИИ на базе Llama 3.3 и может содержать ошибки. "
+                       "Всегда сверяйте важные параметры с оригинальной документацией.")
+            
+            # 2. Кнопка копирования
             copy_to_clipboard(m["content"], f"msg_{i}")
-            st.caption("⚠️ Ответ сгенерирован ИИ на базе Llama 3.3 и может содержать ошибки. Всегда сверяйте важные параметры с оригинальной документацией.")
+            
+            # 3. Подтверждающие источники (если есть)
             verified = m.get("verified_sources", [])
             if verified:
-                with st.expander(f"✅ Подтверждающие выдержки из документов"):
+                with st.expander("✅ Подтверждающие выдержки"):
                     for src in verified:
                         st.success(f"**Источник: {src.get('file')}, стр. {src.get('page')}**")
                         st.text(src.get('content'))
