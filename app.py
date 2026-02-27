@@ -30,8 +30,7 @@ GROQ_API_KEY = st.secrets.get("GROQ_API_KEY")
 MODEL_ID = "llama-3.3-70b-versatile"  # Самая мощная модель в Groq
 API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
-# --- 3. ВЫБОР ВЕРСИИ (ДОБАВЛЕНО) ---
-# Список доступных версий (папок в ./docs)
+# --- 3. ВЫБОР ВЕРСИИ ---
 available_versions = ["27.6", "8.7"]
 
 with st.sidebar:
@@ -43,7 +42,6 @@ with st.sidebar:
         help="Выберите версию системы для поиска в соответствующей документации"
     )
 
-    # Инициализация и сброс истории при смене версии
     if "current_version" not in st.session_state:
         st.session_state.current_version = selected_ver
 
@@ -56,22 +54,18 @@ with st.sidebar:
         st.session_state.messages = []
         st.rerun()
 
-# --- 4. ОБРАБОТКА PDF (ОБНОВЛЕНО ДЛЯ ВЕРСИЙ) ---
+# --- 4. ОБРАБОТКА PDF (ПРАВКА: ЧАНКИ 800) ---
 @st.cache_resource
 def load_docs_engine(version):
-    # Теперь путь строится динамически на основе выбранной версии
     docs_path = os.path.join("./docs", version)
     
     if not os.path.exists(docs_path) or not os.listdir(docs_path):
         return None
     
     all_chunks = []
-    # Реализация ваших инструкций: сначала adminguide, operatorguide, implementguide
     priority_keywords = ['adminguide', 'operatorguide', 'implementguide']
-    
     all_files = [f for f in os.listdir(docs_path) if f.endswith(".pdf")]
     
-    # Сортируем файлы так, чтобы приоритетные были в начале списка обработки
     sorted_files = sorted(
         all_files, 
         key=lambda x: not any(pk in x.lower() for pk in priority_keywords)
@@ -81,39 +75,49 @@ def load_docs_engine(version):
         try:
             loader = PyPDFLoader(os.path.join(docs_path, f))
             pages = loader.load()
-            splitter = RecursiveCharacterTextSplitter(chunk_size=1500, chunk_overlap=200)
+            # ПРАВКА: Уменьшен размер чанка до 800 для более точного попадания в инструкции
+            splitter = RecursiveCharacterTextSplitter(
+                chunk_size=800, 
+                chunk_overlap=300,
+                separators=["\n\n", "\n", " ", ""]
+            )
             all_chunks.extend(splitter.split_documents(pages))
         except Exception as e:
             st.error(f"Ошибка в {f}: {e}")
     return all_chunks
 
-# Загружаем чанки только для выбранной версии
 chunks = load_docs_engine(selected_ver)
 
+# --- 5. УМНЫЙ ПОИСК (ПРАВКА: ОБНОВЛЕННАЯ ЛОГИКА) ---
 def get_context(query, chunks):
     if not chunks: return [], ""
-    query_words = query.lower().split()
+    # Очищаем запрос от коротких слов для более точного поиска
+    query_words = [w.lower() for w in query.split() if len(w) > 2]
     scored = []
     
-    # Приоритеты из ваших инструкций
     priority_keywords = ['adminguide', 'operatorguide', 'implementguide']
     
     for c in chunks:
         content_low = c.page_content.lower()
         filename = os.path.basename(c.metadata.get('source', '')).lower()
         
-        # Базовый скоринг по словам
-        score = sum(2 for w in query_words if len(w) > 3 and w in content_low)
+        # 1. Базовый скоринг (совпадение слов)
+        score = sum(3 for w in query_words if w in content_low)
         
-        # Повышаем приоритет согласно вашим правилам
+        # 2. БОНУС за заголовок (если слова из вопроса есть в начале чанка)
+        header_area = content_low[:60]
+        score += sum(10 for w in query_words if w in header_area)
+        
+        # 3. Приоритет согласно вашим правилам
         if any(pk in filename for pk in priority_keywords):
-            score *= 2.5
+            score *= 2.0
             
         if score > 0:
             scored.append((score, c))
             
     scored.sort(key=lambda x: x[0], reverse=True)
-    top_chunks = scored[:6] # Llama любит качественный, а не избыточный контекст
+    # ПРАВКА: Берем 12 чанков вместо 6, так как они стали меньше по размеру
+    top_chunks = scored[:12] 
     
     raw_data = []
     context_text = ""
@@ -125,10 +129,10 @@ def get_context(query, chunks):
         context_text += f"\n--- ИСТОЧНИК_МЕТКА: {label} ---\n{c.page_content}\n"
     return raw_data, context_text
 
-# --- 5. ИНТЕРФЕЙС ---
+# --- 6. ИНТЕРФЕЙС ---
 st.title("🏗️ MaxPatrol SIEM: Помощник пользователя")
 st.info(f"""Бот отвечает на вопросы по MaxPatrol SIEM **{selected_ver}**, используя только официальную документацию. С пруфами.  
-\n⚠️ **Внимание!** Ответы генерируются ИИ Llama и могут содержать неточности, ошибки, неверные интерпретации документов. Всегда проверяйте важную информацию самостоятельно.  
+\n⚠️ **Внимание!** Ответы генерируются ИИ Llama и могут содержать неточности. Всегда проверяйте важную информацию самостоятельно.  
 \nЧтобы не перегрузить бота запросами:  
 ⏳ Не задавайте более 3-х вопросов в минуту.
 &nbsp;  
@@ -185,7 +189,7 @@ if prompt := st.chat_input(f"Задать вопрос по MaxPatrol SIEM {sele
                     {"role": "system", "content": system_instruction},
                     {"role": "user", "content": f"КОНТЕКСТ:\n{context_for_ai}\n\nВОПРОС:\n{prompt}"}
                 ],
-                "temperature": 0.1 # Для технической точности
+                "temperature": 0.1
             }
             
             try:
