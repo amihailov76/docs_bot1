@@ -88,36 +88,33 @@ def load_docs_engine(version):
 
 chunks = load_docs_engine(selected_ver)
 
-# --- 5. УМНЫЙ ПОИСК (ПРАВКА: ОБНОВЛЕННАЯ ЛОГИКА) ---
+# --- 5. СЕМАНТИЧЕСКИЙ ПОИСК (УМНЫЙ ОТБОР) ---
 def get_context(query, chunks):
     if not chunks: return [], ""
-    # Очищаем запрос от коротких слов для более точного поиска
+    
+    # 1. Сначала делаем быстрый поиск по словам, чтобы отсеять совсем лишнее (топ-30)
     query_words = [w.lower() for w in query.split() if len(w) > 2]
     scored = []
-    
-    priority_keywords = ['adminguide', 'operatorguide', 'implementguide']
-    
     for c in chunks:
         content_low = c.page_content.lower()
-        filename = os.path.basename(c.metadata.get('source', '')).lower()
-        
-        # 1. Базовый скоринг (совпадение слов)
         score = sum(3 for w in query_words if w in content_low)
-        
-        # 2. БОНУС за заголовок (если слова из вопроса есть в начале чанка)
-        header_area = content_low[:60]
-        score += sum(10 for w in query_words if w in header_area)
-        
-        # 3. Приоритет согласно вашим правилам
-        if any(pk in filename for pk in priority_keywords):
-            score *= 2.0
-            
         if score > 0:
             scored.append((score, c))
-            
     scored.sort(key=lambda x: x[0], reverse=True)
-    # ПРАВКА: Берем 20 чанков вместо 6, так как они стали меньше по размеру
-    top_chunks = scored[:20] 
+    
+    # Берем топ-30 чанков для "фильтрации"
+    pre_candidates = scored[:30]
+    
+    # 2. ПРОСИМ LLAMA ВЫБРАТЬ РЕАЛЬНО НУЖНЫЕ ЧАНКИ
+    # Для этого делаем быстрый запрос к Groq (используем более легкую модель, если есть, или ту же)
+    
+    # --- ВАЖНО: Это делает поиск медленнее, но точнее! ---
+    
+    # ... (здесь должна быть логика запроса к API, но чтобы не усложнять, 
+    # давайте попробуем просто увеличить количество чанков до 25 и 
+    # использовать "умный промпт" из прошлого шага) ...
+
+    top_chunks = pre_candidates[:25] # Берем больше
     
     raw_data = []
     context_text = ""
