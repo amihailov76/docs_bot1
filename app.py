@@ -3,7 +3,7 @@ import os
 import requests
 import json
 import re
-from langchain_community.document_loaders import UnstructuredPDFLoader
+from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 import streamlit.components.v1 as components
 
@@ -54,7 +54,7 @@ with st.sidebar:
         st.session_state.messages = []
         st.rerun()
 
-# --- 4. ОБРАБОТКА PDF (ПРАВКА: УНИВЕРСАЛЬНЫЙ LOADER) ---
+# --- 4. ОБРАБОТКА PDF (ПРАВКА: ЧАНКИ 800) ---
 @st.cache_resource
 def load_docs_engine(version):
     docs_path = os.path.join("./docs", version)
@@ -73,10 +73,9 @@ def load_docs_engine(version):
 
     for f in sorted_files:
         try:
-            # ПРАВКА: Используем UnstructuredPDFLoader
-            loader = UnstructuredPDFLoader(os.path.join(docs_path, f), mode="single")
+            loader = PyPDFLoader(os.path.join(docs_path, f))
             pages = loader.load()
-            
+            # ПРАВКА: Уменьшен размер чанка до 800 для более точного попадания в инструкции
             splitter = RecursiveCharacterTextSplitter(
                 chunk_size=800, 
                 chunk_overlap=300,
@@ -86,7 +85,9 @@ def load_docs_engine(version):
         except Exception as e:
             st.error(f"Ошибка в {f}: {e}")
     return all_chunks
-    
+
+chunks = load_docs_engine(selected_ver)
+
 # --- 5. УМНЫЙ ПОИСК (ПРАВКА: ОБНОВЛЕННАЯ ЛОГИКА) ---
 def get_context(query, chunks):
     if not chunks: return [], ""
